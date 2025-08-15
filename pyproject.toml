@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "benchmark-my-code"
+version = "0.0.1"
+description = "A simple, even if not the most efficient, way to benchmark code for educational purposes."
+authors = ["Michał Poręba <michalporeba@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
