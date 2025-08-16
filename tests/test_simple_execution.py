@@ -8,3 +8,9 @@ def test_parameterless_function_with_defaults():
     benchmark = benchit(parameterless_function)
     
     assert type(benchmark) is Benchmark
+    assert len(benchmark.functions) == 1
+
+    func = benchmark.get_function('parameterless_function')
+
+    assert func.name == 'parameterless_function'
+    assert True == callable(func.function)
