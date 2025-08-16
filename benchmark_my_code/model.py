@@ -1,15 +1,46 @@
+import time 
+
+
 class BenchmarkFunction:
     def __init__(self, function: callable):
         self._name = function.__name__
         self._function = function
+        self._executions = 0
+        self._total_time = 0
+        self._max_time = 0
+        self._min_time = 0xffffffff
 
     @property
     def name(self):
         return self._name
 
     @property
-    def function(self):
-        return self._function
+    def executions(self):
+        return self._executions
+
+    @property 
+    def total_time(self):
+        return self._total_time
+
+    @property
+    def min_time(self):
+        return self._min_time
+    
+    @property
+    def max_time(self):
+        return self._max_time
+
+    def benchit(self): 
+        for i in range(100):
+            start_time = time.perf_counter()
+            self._function()
+            end_time = time.perf_counter()
+            run_time = end_time - start_time
+            self._total_time += run_time 
+            self._min_time = min(self._min_time, run_time)
+            self._max_time = max(self._max_time, run_time)
+            self._executions += 1
+
 
 class Benchmark:
     def __init__(self):
@@ -25,3 +56,7 @@ class Benchmark:
 
     def get_function(self, name: str) -> BenchmarkFunction:
         return self._functions.get(name, None)
+
+    def benchit(self):
+        for f in self._functions.values():
+            f.benchit()
