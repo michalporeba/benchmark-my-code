@@ -17,3 +17,5 @@ def test_parameterless_function_with_defaults():
     assert func.executions == 100
     assert func.total_time >= 0.1 
     assert func.min_time < func.max_time
+
+
