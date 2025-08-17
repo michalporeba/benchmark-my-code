@@ -1,2 +1,2 @@
 from .orchestrator import benchit
-from .model import Benchmark, BenchmarkFunction
+from .model import Benchmark, Function

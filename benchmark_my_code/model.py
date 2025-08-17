@@ -1,7 +1,12 @@
 import time 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from .config import get_config
+
+class Variant:
+    pass 
 
 
-class BenchmarkFunction:
+class Function:
     def __init__(self, function: callable):
         self._name = function.__name__
         self._function = function
@@ -46,7 +51,7 @@ class Benchmark:
     def __init__(self):
         self._functions = {} 
 
-    def add_function(self, function: BenchmarkFunction) -> 'Benchmark':
+    def add_function(self, function: Function) -> 'Benchmark':
         self._functions[function.name] = function
         return self
 
@@ -54,9 +59,15 @@ class Benchmark:
     def functions(self):
         return self._functions.values()
 
-    def get_function(self, name: str) -> BenchmarkFunction:
+    def get_function(self, name: str) -> Function:
         return self._functions.get(name, None)
 
     def benchit(self):
         for f in self._functions.values():
-            f.benchit()
+            with ThreadPoolExecutor(max_workers = 1) as executor:
+                future = executor.submit(f.benchit)
+                try:
+                    future.result(timeout=get_config()['max_function_seconds'])
+                except TimeoutError:
+                    print(f"Function {f.name} timed out after {get_config()['max_function_seconds']} seconds.")
+                    break
