@@ -15,6 +15,9 @@ class Function:
         self._max_time = 0
         self._min_time = 0xffffffff
 
+    def __call__(self):
+        return self._function()
+
     @property
     def name(self):
         return self._name
@@ -35,16 +38,11 @@ class Function:
     def max_time(self):
         return self._max_time
 
-    def benchit(self): 
-        for i in range(100):
-            start_time = time.perf_counter()
-            self._function()
-            end_time = time.perf_counter()
-            run_time = end_time - start_time
-            self._total_time += run_time 
-            self._min_time = min(self._min_time, run_time)
-            self._max_time = max(self._max_time, run_time)
-            self._executions += 1
+    def record_execution(self, time: float) -> None:
+        self._executions += 1
+        self._total_time += time 
+        self._min_time = min(self._min_time, time)
+        self._max_time = max(self._max_time, time)
 
 
 class Benchmark:
@@ -61,13 +59,3 @@ class Benchmark:
 
     def get_function(self, name: str) -> Function:
         return self._functions.get(name, None)
-
-    def benchit(self):
-        for f in self._functions.values():
-            with ThreadPoolExecutor(max_workers = 1) as executor:
-                future = executor.submit(f.benchit)
-                try:
-                    future.result(timeout=get_config()['max_function_seconds'])
-                except TimeoutError:
-                    print(f"Function {f.name} timed out after {get_config()['max_function_seconds']} seconds.")
-                    break
