@@ -1,11 +1,3 @@
-import time 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from .config import get_config
-
-class Variant:
-    pass 
-
-
 class Function:
     def __init__(self, function: callable):
         self._name = function.__name__
@@ -38,11 +30,18 @@ class Function:
     def max_time(self):
         return self._max_time
 
-    def record_execution(self, time: float) -> None:
+    def record_execution(self, result: any, time: float) -> None:
         self._executions += 1
         self._total_time += time 
         self._min_time = min(self._min_time, time)
         self._max_time = max(self._max_time, time)
+        print(f"function {self._name} finished in {time} ms and returned {result}")
+
+    def record_timeout(self) -> None:
+        pass 
+
+    def record_exception(self, exception: Exception) -> None: 
+        pass
 
 
 class Benchmark:
