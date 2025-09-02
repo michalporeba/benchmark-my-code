@@ -1,3 +1,21 @@
+from typing import Any
+
+
+class Variant:
+    def __init__(self, definition: Any):
+        self._name = str(definition)
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def args(self):
+        return None
+
+    
+
+
 class Function:
     def __init__(self, function: callable):
         self._name = function.__name__
@@ -7,8 +25,9 @@ class Function:
         self._max_time = 0
         self._min_time = 0xffffffff
 
-    def __call__(self):
-        return self._function()
+
+    def __call__(self, args=(), kwargs={}):
+        return self._function(*args, **kwargs)
 
     @property
     def name(self):

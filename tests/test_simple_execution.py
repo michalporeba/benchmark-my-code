@@ -6,7 +6,7 @@ def test_parameterless_function_with_defaults():
     def parameterless_function():
         time.sleep(0.001)
     
-    benchmark = benchit(parameterless_function)
+    benchmark = bench(parameterless_function)
     
     assert type(benchmark) is Benchmark
     assert len(benchmark.functions) == 1
