@@ -1,3 +1,4 @@
+import statistics
 from typing import Any
 
 
@@ -56,6 +57,21 @@ class Function:
             return self._max_time.get(variant, 0)
         return max(self._max_time.values()) if self._max_time else 0
 
+    def median_time(self, variant=None):
+        if variant:
+            executions = self._executions.get(variant, [])
+            if not executions:
+                return 0
+            return statistics.median(executions)
+        
+        # If no variant specified, get median across all executions of all variants
+        all_executions = []
+        for exs in self._executions.values():
+            all_executions.extend(exs)
+        if not all_executions:
+            return 0
+        return statistics.median(all_executions)
+
     def record_execution_time(self, variant: str, time: float) -> None:
         if variant not in self._executions:
             self._executions[variant] = []
@@ -73,10 +89,18 @@ class Function:
         executions = self._executions.get(variant, [])
         if len(executions) > self._windows_size:
             recent = executions[-self._windows_size:]
-            recent_average = sum(recent) / self._windows_size
-            average = sum(executions) / len(executions)
-            change_rate = (average - recent_average) / ((average + recent_average) / 2)
+            recent_median = statistics.median(recent)
+            overall_median = statistics.median(executions)
+            
+            # Prevent division by zero
+            if overall_median == 0 and recent_median == 0:
+                return True
+            elif overall_median + recent_median == 0:
+                return False
+                
+            change_rate = (overall_median - recent_median) / ((overall_median + recent_median) / 2)
             return abs(change_rate) < 0.01 
+        return False
 
     def get_executions(self, variant: str):
         return self._executions.get(variant, [])

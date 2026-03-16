@@ -54,10 +54,11 @@ def format_parameters(args, kwargs):
 
 def measure_time(function: Callable, args=(), kwargs={}):
     def test():
-        start_time = time.perf_counter()
+        start_time = time.perf_counter_ns()
         result = function(*args, **kwargs)
-        end_time = time.perf_counter()
-        return (result, end_time - start_time)
+        end_time = time.perf_counter_ns()
+        # Convert nanoseconds to seconds for the final tracked time
+        return (result, (end_time - start_time) / 1_000_000_000.0)
 
     with ThreadPoolExecutor(max_workers=1) as executor: 
         future = executor.submit(test)
@@ -68,4 +69,10 @@ def normalised_variants(variants: Any):
     if variants is None:
         yield ((), {}, None)
     else: 
-        yield from (((v,), {}, None) for v in variants)
+        for v in variants:
+            # If the user passed a tuple, treat it as the args tuple
+            if isinstance(v, tuple):
+                yield (v, {}, None)
+            else:
+                # Otherwise, wrap the single value in a tuple
+                yield ((v,), {}, None)
