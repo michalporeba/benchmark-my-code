@@ -6,9 +6,17 @@ import logging
 
 log = logging.getLogger(__name__)
 
-def bench(function: Callable, variants: Any = None, max_executions: int = 100, warmup_executions: int = 10, batch_size: int = 10) -> Benchmark:
+import copy
+
+def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmup_executions: int = 10, batch_size: int = 10) -> Benchmark:
     benchmark = Benchmark()
-    benchmark.add_function(Function(function))
+    
+    # Handle single callable vs iterable of callables
+    if callable(functions):
+        functions = [functions]
+        
+    for func in functions:
+        benchmark.add_function(Function(func))
 
     for f in benchmark.functions:
         log.info(f"Benchmarking function {f.name}")
@@ -21,7 +29,7 @@ def bench(function: Callable, variants: Any = None, max_executions: int = 100, w
                 log.info(f"Warmup: running {warmup_executions} times")
                 for _ in range(warmup_executions):
                     try:
-                        measure_time(f, args, kwargs)
+                        measure_time(f, copy.deepcopy(args), copy.deepcopy(kwargs))
                     except Exception:
                         break
 
@@ -35,7 +43,7 @@ def bench(function: Callable, variants: Any = None, max_executions: int = 100, w
                 # Run the batch
                 for _ in range(current_batch_size):
                     try:
-                        (result, run_time) = measure_time(f, args, kwargs)
+                        (result, run_time) = measure_time(f, copy.deepcopy(args), copy.deepcopy(kwargs))
                         f.record_execution_time(variant, run_time)
                         total_executions += 1
                     except TimeoutError:
