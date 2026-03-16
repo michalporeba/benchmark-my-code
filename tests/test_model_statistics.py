@@ -15,22 +15,31 @@ def test_function_median_time_ignores_outliers():
         
     assert func.median_time('var1') == 0.01
 
-def test_executions_stable_uses_median():
+def test_check_convergence_uses_median():
     func = Function(dummy_func)
-    func._windows_size = 5
     
-    # establish stable median of 0.05
-    for _ in range(10):
-        func.record_execution_time('var1', 0.05)
-        
-    # inject outliers into the recent window
+    # Establish previous median
+    previous_median = 0.05
+    
+    # Run a batch with outliers
     func.record_execution_time('var1', 0.05)
     func.record_execution_time('var1', 5.0)
     func.record_execution_time('var1', 0.05)
     func.record_execution_time('var1', 5.0)
     func.record_execution_time('var1', 0.05)
+    
+    is_stable, current_median = func.check_convergence('var1', previous_median)
     
     # With a median-based stability check, the median of the last 5 
     # [0.05, 5.0, 0.05, 5.0, 0.05] is still 0.05, so it remains stable.
     # An arithmetic mean would see a huge spike.
-    assert func.executions_stable('var1') is True
+    assert current_median == 0.05
+    assert is_stable is True
+
+def test_check_convergence_first_batch():
+    func = Function(dummy_func)
+    func.record_execution_time('var1', 0.05)
+    
+    is_stable, current_median = func.check_convergence('var1', 0.0)
+    assert current_median == 0.05
+    assert is_stable is False # First batch should not be considered stable

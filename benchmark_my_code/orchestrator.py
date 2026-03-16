@@ -6,7 +6,7 @@ import logging
 
 log = logging.getLogger(__name__)
 
-def bench(function: Callable, variants: Any = None, max_executions: int = 100, warmup_executions: int = 10) -> Benchmark:
+def bench(function: Callable, variants: Any = None, max_executions: int = 100, warmup_executions: int = 10, batch_size: int = 10) -> Benchmark:
     benchmark = Benchmark()
     benchmark.add_function(Function(function))
 
@@ -25,22 +25,40 @@ def bench(function: Callable, variants: Any = None, max_executions: int = 100, w
                     except Exception:
                         break
 
-            for i in range(max_executions):
-                try:
-                    (result, run_time) = measure_time(f, args, kwargs)
-                    f.record_execution_time(variant, run_time)
-                    if f.executions_stable(variant):
-                        log.info(f"Results for {f.name}({variant}) are stable after {len(f.get_executions(variant))} executions.")
+            total_executions = 0
+            previous_median = 0.0
+
+            while total_executions < max_executions:
+                current_batch_size = min(batch_size, max_executions - total_executions)
+                batch_aborted = False
+                
+                # Run the batch
+                for _ in range(current_batch_size):
+                    try:
+                        (result, run_time) = measure_time(f, args, kwargs)
+                        f.record_execution_time(variant, run_time)
+                        total_executions += 1
+                    except TimeoutError:
+                        f.record_timeout()
+                        batch_aborted = True
                         break
-                    # TODO: check if the results are converging and if so, stop early. 
-                except TimeoutError:
-                    f.record_timeout()
-                    # TODO: timeouts at this level should be retried a set number of times.
+                    except Exception as e:
+                        f.record_exception(e)
+                        batch_aborted = True
+                        break
+
+                if batch_aborted:
                     break
-                except Exception as e:
-                    f.record_exception(e)
-                    # TODO: unless the expected result is an exception of the same type. 
+
+                # Evaluate stability at batch boundary
+                is_stable, current_median = f.check_convergence(variant, previous_median)
+                
+                # Don't consider it stable if previous_median was 0 (first batch)
+                if is_stable and previous_median > 0:
+                    log.info(f"Results for {f.name}({variant}) are stable after {total_executions} executions.")
                     break
+                    
+                previous_median = current_median
 
     return benchmark
 

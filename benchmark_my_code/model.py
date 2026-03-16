@@ -25,7 +25,6 @@ class Function:
         self._total_time = {}
         self._max_time = {}
         self._min_time = {}
-        self._windows_size = 10
 
     def __call__(self, *args, **kwargs):
         return self._function(*args, **kwargs)
@@ -85,22 +84,20 @@ class Function:
         self._max_time[variant] = max(self._max_time[variant], time)
 
         
-    def executions_stable(self, variant):
-        executions = self._executions.get(variant, [])
-        if len(executions) > self._windows_size:
-            recent = executions[-self._windows_size:]
-            recent_median = statistics.median(recent)
-            overall_median = statistics.median(executions)
+    def check_convergence(self, variant: str, previous_median: float) -> tuple[bool, float]:
+        """
+        Evaluates if the current median has converged relative to a previous median.
+        Returns a tuple: (has_converged: bool, current_median: float)
+        """
+        current_median = self.median_time(variant)
+        
+        if previous_median == 0 and current_median == 0:
+            return True, current_median
+        elif previous_median == 0:
+            return False, current_median
             
-            # Prevent division by zero
-            if overall_median == 0 and recent_median == 0:
-                return True
-            elif overall_median + recent_median == 0:
-                return False
-                
-            change_rate = (overall_median - recent_median) / ((overall_median + recent_median) / 2)
-            return abs(change_rate) < 0.01 
-        return False
+        change_rate = abs((current_median - previous_median) / previous_median)
+        return change_rate < 0.01, current_median
 
     def get_executions(self, variant: str):
         return self._executions.get(variant, [])
