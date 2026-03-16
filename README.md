@@ -10,7 +10,7 @@ def my_function():
     pass
 
 if __name__ == '__main__':
-    results = benchit(my_function)
+    results = bench(my_function)
     print(results)
 ```
 

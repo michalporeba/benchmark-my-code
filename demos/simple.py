@@ -1,4 +1,9 @@
 import benchmark_my_code as bmc
+import logging
+
+
+logging.basicConfig(level=logging.DEBUG)
+
 
 def collatz(n):
     steps = 0
@@ -11,10 +16,4 @@ def collatz(n):
     return steps
 
 
-bmc.bench(collatz, range(1, 100))
-
-def noop():
-    pass
-
-
-bmc.bench(noop)
+bmc.bench(collatz, range(1, 5), max_executions=100)

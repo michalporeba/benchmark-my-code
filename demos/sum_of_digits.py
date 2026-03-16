@@ -13,5 +13,5 @@ def sum_of_digits_using_modulo(number):
 
 variants = (1, 10, 123, 4567, 89012, 345678, 67890123, 456789012, 1234567890)
 
-benchmark_my_code.bench(sum_of_digits_using_modulo, variants)
-benchmark_my_code.bench(sum_of_digits_using_string, variants)
+benchmark_my_code.bench(sum_of_digits_using_modulo, variants, max_executions=3)
+benchmark_my_code.bench(sum_of_digits_using_string, variants, max_executions=3)

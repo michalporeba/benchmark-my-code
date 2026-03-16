@@ -20,13 +20,13 @@ class Function:
     def __init__(self, function: callable):
         self._name = function.__name__
         self._function = function
-        self._executions = 0
-        self._total_time = 0
-        self._max_time = 0
-        self._min_time = 0xffffffff
+        self._executions = {} 
+        self._total_time = {}
+        self._max_time = {}
+        self._min_time = {}
+        self._windows_size = 10
 
-
-    def __call__(self, args=(), kwargs={}):
+    def __call__(self, *args, **kwargs):
         return self._function(*args, **kwargs)
 
     @property
@@ -35,26 +35,51 @@ class Function:
 
     @property
     def executions(self):
-        return self._executions
-
-    @property 
-    def total_time(self):
-        return self._total_time
+        return sum(len(exs) for exs in self._executions.values())
 
     @property
-    def min_time(self):
-        return self._min_time
+    def variant_count(self):
+        return len(self._executions)
+
+    def total_time(self, variant=None):
+        if variant:
+            return self._total_time.get(variant, 0)
+        return sum(self._total_time.values())
+
+    def min_time(self, variant=None):
+        if variant:
+            return self._min_time.get(variant, 0)
+        return min(self._min_time.values()) if self._min_time else 0
     
-    @property
-    def max_time(self):
-        return self._max_time
+    def max_time(self, variant=None):
+        if variant:
+            return self._max_time.get(variant, 0)
+        return max(self._max_time.values()) if self._max_time else 0
 
-    def record_execution(self, result: any, time: float) -> None:
-        self._executions += 1
-        self._total_time += time 
-        self._min_time = min(self._min_time, time)
-        self._max_time = max(self._max_time, time)
-        print(f"function {self._name} finished in {time} ms and returned {result}")
+    def record_execution_time(self, variant: str, time: float) -> None:
+        if variant not in self._executions:
+            self._executions[variant] = []
+            self._total_time[variant] = 0
+            self._min_time[variant] = time
+            self._max_time[variant] = time
+
+        self._executions[variant].append(time)        
+        self._total_time[variant] += time 
+        self._min_time[variant] = min(self._min_time[variant], time)
+        self._max_time[variant] = max(self._max_time[variant], time)
+
+        
+    def executions_stable(self, variant):
+        executions = self._executions.get(variant, [])
+        if len(executions) > self._windows_size:
+            recent = executions[-self._windows_size:]
+            recent_average = sum(recent) / self._windows_size
+            average = sum(executions) / len(executions)
+            change_rate = (average - recent_average) / ((average + recent_average) / 2)
+            return abs(change_rate) < 0.01 
+
+    def get_executions(self, variant: str):
+        return self._executions.get(variant, [])
 
     def record_timeout(self) -> None:
         pass 
