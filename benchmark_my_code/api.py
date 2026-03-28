@@ -12,7 +12,7 @@ def benchit(func: Callable) -> Callable:
     _GLOBAL_REGISTRY.append(func)
     return func
 
-def run_benchmarks(variants: Any = None, validate: bool = False, **kwargs):
+def run_benchmarks(variants: Any = None, validate: bool = False, print_results: bool = True, **kwargs):
     """
     Runs benchmarks for all registered functions.
     If validate=True, ensures all functions return the same result for each variant.
@@ -47,7 +47,15 @@ def run_benchmarks(variants: Any = None, validate: bool = False, **kwargs):
                 raise InconsistentOutcomesError(error_msg)
 
     # Run the actual benchmarks
-    return bench(_GLOBAL_REGISTRY, variants=variants, **kwargs)
+    benchmark = bench(_GLOBAL_REGISTRY, variants=variants, **kwargs)
+    
+    from .result import BenchmarkResult
+    result = BenchmarkResult(benchmark)
+    
+    if print_results:
+        print(result)
+        
+    return result
 
 # Allow clearing registry if needed
 def clear_registry():

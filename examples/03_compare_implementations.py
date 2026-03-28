@@ -37,14 +37,6 @@ if __name__ == '__main__':
     
     # We now just call run_benchmarks and it automatically picks up the decorated functions.
     # We also pass validate=True to ensure they all actually produce the same reversed string!
-    result_suite = run_benchmarks(variants=variants, max_executions=50, validate=True)
-    
-    print("\n--- Results Summary ---")
-    print(f"{'Implementation':<30} | {'Executions':<12} | {'Min Time (s)':<15}")
-    print("-" * 65)
-    
-    for func in result_suite.functions:
-        for v in func._executions:
-            min_t = func.min_time(v)
-            count = len(func.get_executions(v))
-            print(f"{func.name:<30} | {count:<12} | {min_t:.6f}")
+    # By default, it will cleanly print the results to the terminal.
+    run_benchmarks(variants=variants, max_executions=50, validate=True)
+
