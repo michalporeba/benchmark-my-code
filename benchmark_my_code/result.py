@@ -1,5 +1,5 @@
 from typing import List, Dict, Any
-from .model import Benchmark
+from .model import Benchmark, FailureType
 
 class BenchmarkResult:
     """A formatted wrapper around the raw Benchmark model, providing zero-dependency CLI and Notebook outputs."""
@@ -7,6 +7,7 @@ class BenchmarkResult:
     def __init__(self, benchmark: Benchmark):
         self._benchmark = benchmark
         self.stats = self._extract_stats()
+        self.hints = []
 
     def _extract_stats(self) -> List[Dict[str, Any]]:
         stats = []
@@ -19,14 +20,21 @@ class BenchmarkResult:
                     "median_time": func.median_time(variant),
                     "min_time": func.min_time(variant),
                     "max_time": func.max_time(variant),
+                    "status": func.get_status(variant)
                 })
         return stats
+
+    def _format_status(self, status: FailureType) -> str:
+        if status == FailureType.NONE:
+            return "PASS"
+        return status.name
 
     def __str__(self):
         """Zero-dependency ASCII table formatting for the terminal."""
         if not self.stats:
             return "No benchmark results."
         
+        output = ""
         # Try to use rich if installed
         try:
             from rich.console import Console
@@ -37,34 +45,44 @@ class BenchmarkResult:
             table.add_column("Variant", style="magenta")
             table.add_column("Execs", justify="right", style="green")
             table.add_column("Median (s)", justify="right")
-            table.add_column("Min (s)", justify="right")
+            table.add_column("Status", justify="center")
 
             for s in self.stats:
+                status_str = self._format_status(s['status'])
+                style = "red" if s['status'] != FailureType.NONE else "green"
+                
                 table.add_row(
                     s['function'],
                     str(s['variant']),
                     str(s['executions']),
                     f"{s['median_time']:.6f}",
-                    f"{s['min_time']:.6f}"
+                    f"[{style}]{status_str}[/{style}]"
                 )
                 
             console = Console()
             with console.capture() as capture:
                 console.print(table)
-            return capture.get()
+            output = capture.get()
         except ImportError:
             # Fallback to plain ASCII table
             col_func = max(14, max((len(s["function"]) for s in self.stats), default=14))
             col_var = max(7, max((len(str(s["variant"])) for s in self.stats), default=7))
             
-            header = f"{'Function':<{col_func}} | {'Variant':<{col_var}} | {'Execs':<10} | {'Median (s)':<15} | {'Min (s)':<15}"
+            header = f"{'Function':<{col_func}} | {'Variant':<{col_var}} | {'Execs':<10} | {'Median (s)':<15} | {'Status':<10}"
             divider = "-" * len(header)
             
             lines = [header, divider]
             for s in self.stats:
-                lines.append(f"{s['function']:<{col_func}} | {str(s['variant']):<{col_var}} | {s['executions']:<10} | {s['median_time']:<15.6f} | {s['min_time']:<15.6f}")
-                
-            return "\n".join(lines)
+                status_str = self._format_status(s['status'])
+                lines.append(f"{s['function']:<{col_func}} | {str(s['variant']):<{col_var}} | {s['executions']:<10} | {s['median_time']:<15.6f} | {status_str:<10}")
+            output = "\n".join(lines) + "\n"
+
+        if self.hints:
+            output += "\n💡 FEEDBACK:\n"
+            for hint in self.hints:
+                output += f"  - {hint}\n"
+        
+        return output
 
     def _repr_html_(self):
         """Zero-dependency HTML table formatting for Jupyter Notebooks."""
@@ -77,19 +95,31 @@ class BenchmarkResult:
         html.append("<th style='padding: 8px;'>Variant</th>")
         html.append("<th style='padding: 8px; text-align: right;'>Executions</th>")
         html.append("<th style='padding: 8px; text-align: right;'>Median Time (s)</th>")
-        html.append("<th style='padding: 8px; text-align: right;'>Min Time (s)</th>")
+        html.append("<th style='padding: 8px; text-align: center;'>Status</th>")
         html.append("</tr></thead><tbody>")
         
         for s in self.stats:
+            status_str = self._format_status(s['status'])
+            color = "#d9534f" if s['status'] != FailureType.NONE else "#5cb85c"
+            
             html.append("<tr style='border-bottom: 1px solid #eee;'>")
             html.append(f"<td style='padding: 8px; font-weight: bold;'>{s['function']}</td>")
             html.append(f"<td style='padding: 8px;'><code>{s['variant']}</code></td>")
             html.append(f"<td style='padding: 8px; text-align: right;'>{s['executions']}</td>")
             html.append(f"<td style='padding: 8px; text-align: right;'>{s['median_time']:.6f}</td>")
-            html.append(f"<td style='padding: 8px; text-align: right;'>{s['min_time']:.6f}</td>")
+            html.append(f"<td style='padding: 8px; text-align: center; color: white; background-color: {color}; font-size: 0.8em; border-radius: 4px;'>{status_str}</td>")
             html.append("</tr>")
             
         html.append("</tbody></table>")
+        
+        if self.hints:
+            html.append("<div style='background-color: #fcf8e3; border: 1px solid #faebcc; padding: 15px; margin-top: 1em; border-radius: 4px; color: #8a6d3b;'>")
+            html.append("<strong>💡 FEEDBACK:</strong>")
+            html.append("<ul style='margin-bottom: 0;'>")
+            for hint in self.hints:
+                html.append(f"<li>{hint}</li>")
+            html.append("</ul></div>")
+            
         return "".join(html)
 
     # Pass-through methods to maintain backwards compatibility

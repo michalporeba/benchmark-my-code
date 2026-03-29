@@ -1,5 +1,13 @@
 import statistics
 from typing import Any
+from enum import Enum, auto
+
+class FailureType(Enum):
+    NONE = auto()
+    CORRECTNESS = auto()
+    TIMEOUT = auto()
+    EXCEPTION = auto()
+    CONSTRAINT = auto()
 
 
 class Variant:
@@ -25,6 +33,7 @@ class Function:
         self._total_time = {}
         self._max_time = {}
         self._min_time = {}
+        self._status = {} # Map variant -> FailureType
 
     def __call__(self, *args, **kwargs):
         return self._function(*args, **kwargs)
@@ -77,13 +86,34 @@ class Function:
             self._total_time[variant] = 0
             self._min_time[variant] = time
             self._max_time[variant] = time
+            self._status[variant] = FailureType.NONE
 
         self._executions[variant].append(time)        
         self._total_time[variant] += time 
         self._min_time[variant] = min(self._min_time[variant], time)
         self._max_time[variant] = max(self._max_time[variant], time)
 
-        
+    def merge(self, other: 'Function') -> None:
+        """Merges execution data from another Function object into this one."""
+        for variant, times in other._executions.items():
+            if variant not in self._executions:
+                self._executions[variant] = []
+                self._total_time[variant] = 0
+                self._min_time[variant] = other._min_time[variant]
+                self._max_time[variant] = other._max_time[variant]
+                self._status[variant] = other._status.get(variant, FailureType.NONE)
+            
+            self._executions[variant].extend(times)
+            self._total_time[variant] += other._total_time[variant]
+            self._min_time[variant] = min(self._min_time[variant], other._min_time[variant])
+            self._max_time[variant] = max(self._max_time[variant], other._max_time[variant])
+
+    def record_status(self, variant: str, status: FailureType) -> None:
+        self._status[variant] = status
+
+    def get_status(self, variant: str) -> FailureType:
+        return self._status.get(variant, FailureType.NONE)
+
     def check_convergence(self, variant: str, previous_median: float) -> tuple[bool, float]:
         """
         Evaluates if the current median has converged relative to a previous median.
@@ -102,21 +132,24 @@ class Function:
     def get_executions(self, variant: str):
         return self._executions.get(variant, [])
 
-    def record_timeout(self) -> None:
-        pass 
+    def record_timeout(self, variant: str) -> None:
+        self._status[variant] = FailureType.TIMEOUT
 
-    def record_exception(self, exception: Exception) -> None: 
-        pass
+    def record_exception(self, variant: str, exception: Exception) -> None: 
+        self._status[variant] = FailureType.EXCEPTION
 
 
 class Challenge:
     """Defines a benchmarking challenge with a specific contract."""
-    def __init__(self, name: str, parameters: list[str], variants: Any, reference: callable = None, banned_calls: list[str] = None):
+    def __init__(self, name: str, parameters: list[str], variants: Any = None, reference: callable = None, banned_calls: list[str] = None, timeout_multiplier: float = 10.0, stages: dict = None, hints: dict = None):
         self.name = name
         self.parameters = parameters
         self.variants = variants
         self.reference = reference
         self.banned_calls = banned_calls or []
+        self.timeout_multiplier = timeout_multiplier
+        self.stages = stages or {}
+        self.hints = hints or {}
 
 
 class Benchmark:
@@ -124,7 +157,10 @@ class Benchmark:
         self._functions = {} 
 
     def add_function(self, function: Function) -> 'Benchmark':
-        self._functions[function.name] = function
+        if function.name in self._functions:
+            self._functions[function.name].merge(function)
+        else:
+            self._functions[function.name] = function
         return self
 
     @property

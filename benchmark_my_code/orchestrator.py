@@ -8,7 +8,7 @@ log = logging.getLogger(__name__)
 
 import copy
 
-def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmup_executions: int = 10, batch_size: int = 10) -> Benchmark:
+def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmup_executions: int = 10, batch_size: int = 10, timeout: float = 100.0) -> Benchmark:
     benchmark = Benchmark()
 
     # Handle single callable vs iterable of callables
@@ -29,7 +29,7 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
                 log.info(f"Warmup: running {warmup_executions} times")
                 for _ in range(warmup_executions):
                     try:
-                        measure_time(f, copy.deepcopy(args), copy.deepcopy(kwargs))
+                        measure_time(f, copy.deepcopy(args), copy.deepcopy(kwargs), timeout=timeout)
                     except Exception:
                         break
 
@@ -43,15 +43,15 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
                 # Run the batch
                 for _ in range(current_batch_size):
                     try:
-                        (result, run_time) = measure_time(f, copy.deepcopy(args), copy.deepcopy(kwargs))
+                        (result, run_time) = measure_time(f, copy.deepcopy(args), copy.deepcopy(kwargs), timeout=timeout)
                         f.record_execution_time(variant_label, run_time)
                         total_executions += 1
                     except TimeoutError:
-                        f.record_timeout()
+                        f.record_timeout(variant_label)
                         batch_aborted = True
                         break
                     except Exception as e:
-                        f.record_exception(e)
+                        f.record_exception(variant_label, e)
                         batch_aborted = True
                         break
 
@@ -78,7 +78,7 @@ def format_parameters(args, kwargs):
     return args_string or kwargs_string
 
 
-def measure_time(function: Callable, args=(), kwargs={}):
+def measure_time(function: Callable, args=(), kwargs={}, timeout=100.0):
     def test():
         start_time = time.perf_counter_ns()
         result = function(*args, **kwargs)
@@ -88,7 +88,7 @@ def measure_time(function: Callable, args=(), kwargs={}):
 
     with ThreadPoolExecutor(max_workers=1) as executor: 
         future = executor.submit(test)
-        return future.result(timeout=100)
+        return future.result(timeout=timeout)
 
 
 def normalised_variants(variants: Any):

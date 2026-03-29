@@ -1,11 +1,12 @@
-from typing import Any, Callable, List, Union, Iterable
-from .orchestrator import bench, measure_time, normalised_variants
-from .model import Challenge, Benchmark
+from typing import Any, Callable, List, Union, Iterable, Dict
+from .orchestrator import bench, measure_time, normalised_variants, format_parameters
+from .model import Challenge, Benchmark, FailureType
 import logging
 import inspect
 import ast
 import copy
 import random
+import textwrap
 
 _GLOBAL_REGISTRY: List[Callable] = []
 _CHALLENGE_REGISTRY: List[tuple[Callable, Challenge]] = []
@@ -43,18 +44,14 @@ class ForbiddenCallVisitor(ast.NodeVisitor):
         self.found = []
 
     def visit_Call(self, node):
-        # Handle simple calls: func()
         if isinstance(node.func, ast.Name):
             if node.func.id in self.banned_list:
                 self.found.append(node.func.id)
-        # Handle attribute calls: obj.method()
         elif isinstance(node.func, ast.Attribute):
-            full_name = f"{node.func.attr}" # For simplicity, just check method name
+            full_name = f"{node.func.attr}" 
             if full_name in self.banned_list:
                 self.found.append(full_name)
         self.generic_visit(node)
-
-import textwrap
 
 def validate_algorithmic_constraints(func: Callable, banned_calls: List[str]):
     """Checks if the function uses any forbidden built-ins or methods."""
@@ -74,7 +71,6 @@ def validate_algorithmic_constraints(func: Callable, banned_calls: List[str]):
                 f"Function '{func.__name__}' must be implemented from scratch."
             )
     except (OSError, TypeError):
-        # Fallback if source cannot be retrieved (e.g. REPL)
         logging.warning(f"Could not retrieve source for '{func.__name__}'. Algorithmic constraints not verified.")
 
 def challenge(challenge_obj: Challenge):
@@ -96,6 +92,7 @@ def run_benchmarks(variants: Any = None, validate: bool = False, print_results: 
         return None
 
     total_benchmark = Benchmark()
+    hints = []
 
     # 1. Run Ad-hoc benchmarks
     if _GLOBAL_REGISTRY:
@@ -124,7 +121,6 @@ def run_benchmarks(variants: Any = None, validate: bool = False, print_results: 
             total_benchmark.add_function(f)
 
     # 2. Run Challenge benchmarks
-    # Group by challenge to ensure variant generator runs once per challenge
     by_challenge = {}
     for func, chall in _CHALLENGE_REGISTRY:
         if chall not in by_challenge:
@@ -132,42 +128,74 @@ def run_benchmarks(variants: Any = None, validate: bool = False, print_results: 
         by_challenge[chall].append(func)
 
     for chall, funcs in by_challenge.items():
-        # Handle variant generator
-        actual_variants = chall.variants
-        if callable(actual_variants):
-            random.seed(42) # Ensure predictable randomness for pedagogical fairness
-            actual_variants = actual_variants()
-
-        # Include reference implementation if it exists
-        all_to_run = list(funcs)
+        # Handle stages vs variants
+        run_stages = chall.stages if chall.stages else {"Default": chall.variants}
+        
+        ref_name = None
         if chall.reference:
-            # We wrap the reference to label it clearly
             ref_func = chall.reference
             if not hasattr(ref_func, '__name__') or ref_func.__name__ == '<lambda>':
                 ref_func.__name__ = f"Reference_{chall.name.replace(' ', '_')}"
-            all_to_run.insert(0, ref_func)
+            ref_name = ref_func.__name__
 
-        # Validation against reference
-        if validate and chall.reference:
+        stop_challenge = False
+        for stage_name, stage_variants in run_stages.items():
+            if stop_challenge: break
+            
+            # Handle generator in stage variants
+            actual_variants = stage_variants
+            if callable(actual_variants):
+                random.seed(42)
+                actual_variants = actual_variants()
+
             for (args, kwargs_variant, name) in normalised_variants(actual_variants):
-                variant_label = name or f"args={args}"
-                ref_res, _ = measure_time(chall.reference, copy.deepcopy(args), copy.deepcopy(kwargs_variant))
-                for func in funcs:
-                    student_res, _ = measure_time(func, copy.deepcopy(args), copy.deepcopy(kwargs_variant))
-                    if student_res != ref_res:
-                        raise InconsistentOutcomesError(
-                            f"Student solution '{func.__name__}' failed correctness check against reference.\n"
-                            f"Variant:  {variant_label}\n"
-                            f"Expected: {ref_res}\n"
-                            f"Got:      {student_res}"
-                        )
+                if stop_challenge: break
+                
+                variant_label = name or format_parameters(args, kwargs_variant)
+                current_variant_data = {variant_label: args}
+                
+                adaptive_timeout = 100.0
+                
+                # 2a. Run reference first
+                if chall.reference:
+                    ref_bench = bench(chall.reference, variants=current_variant_data, **kwargs)
+                    for f in ref_bench.functions:
+                        total_benchmark.add_function(f)
+                    
+                    ref_func_obj = ref_bench.get_function(ref_name)
+                    ref_median = ref_func_obj.median_time(variant_label)
+                    adaptive_timeout = max(ref_median * chall.timeout_multiplier, 0.001)
 
-        chall_bench = bench(all_to_run, variants=actual_variants, **kwargs)
-        for f in chall_bench.functions:
-            total_benchmark.add_function(f)
+                # 2b. Run student functions
+                chall_bench = bench(funcs, variants=current_variant_data, timeout=adaptive_timeout, **kwargs)
+                
+                for f in chall_bench.functions:
+                    total_benchmark.add_function(f)
+                    
+                    # Correctness Check against Reference
+                    status = f.get_status(variant_label)
+                    if status == FailureType.NONE and chall.reference:
+                        # Only check correctness if it didn't timeout or crash
+                        try:
+                            ref_res, _ = measure_time(chall.reference, copy.deepcopy(args), copy.deepcopy(kwargs_variant))
+                            student_res, _ = measure_time(f._function, copy.deepcopy(args), copy.deepcopy(kwargs_variant))
+                            if student_res != ref_res:
+                                f.record_status(variant_label, FailureType.CORRECTNESS)
+                                status = FailureType.CORRECTNESS
+                        except Exception:
+                            # If student code crashes during correctness check, it should have been caught by bench
+                            pass
+
+                    # Hint Lookup
+                    if status != FailureType.NONE:
+                        hint = chall.hints.get((stage_name, status))
+                        if hint:
+                            hints.append(hint)
+                            stop_challenge = True # Stop on first hintable failure
 
     from .result import BenchmarkResult
     result = BenchmarkResult(total_benchmark)
+    result.hints = hints
     
     if print_results:
         print(result)
