@@ -1,4 +1,4 @@
 from .orchestrator import bench
-from .model import Benchmark, Function
+from .model import Benchmark, Function, Challenge
 from .result import BenchmarkResult
-from .api import benchit, run_benchmarks, InconsistentOutcomesError, clear_registry
+from .api import benchit, challenge, run_benchmarks, InconsistentOutcomesError, InvalidSignatureError, ForbiddenCallError, clear_registry

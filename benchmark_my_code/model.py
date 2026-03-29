@@ -109,6 +109,16 @@ class Function:
         pass
 
 
+class Challenge:
+    """Defines a benchmarking challenge with a specific contract."""
+    def __init__(self, name: str, parameters: list[str], variants: Any, reference: callable = None, banned_calls: list[str] = None):
+        self.name = name
+        self.parameters = parameters
+        self.variants = variants
+        self.reference = reference
+        self.banned_calls = banned_calls or []
+
+
 class Benchmark:
     def __init__(self):
         self._functions = {} 

@@ -10,20 +10,20 @@ import copy
 
 def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmup_executions: int = 10, batch_size: int = 10) -> Benchmark:
     benchmark = Benchmark()
-    
+
     # Handle single callable vs iterable of callables
     if callable(functions):
         functions = [functions]
-        
+
     for func in functions:
         benchmark.add_function(Function(func))
 
     for f in benchmark.functions:
         log.info(f"Benchmarking function {f.name}")
-        for (args, kwargs, expected_result) in normalised_variants(variants):
-            variant = format_parameters(args, kwargs)
-            log.info(f"testing {f.name}({variant})")
-            
+        for (args, kwargs, name) in normalised_variants(variants):
+            variant_label = name or format_parameters(args, kwargs)
+            log.info(f"testing {f.name}({variant_label})")
+
             # Warmup
             if warmup_executions > 0:
                 log.info(f"Warmup: running {warmup_executions} times")
@@ -39,12 +39,12 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
             while total_executions < max_executions:
                 current_batch_size = min(batch_size, max_executions - total_executions)
                 batch_aborted = False
-                
+
                 # Run the batch
                 for _ in range(current_batch_size):
                     try:
                         (result, run_time) = measure_time(f, copy.deepcopy(args), copy.deepcopy(kwargs))
-                        f.record_execution_time(variant, run_time)
+                        f.record_execution_time(variant_label, run_time)
                         total_executions += 1
                     except TimeoutError:
                         f.record_timeout()
@@ -59,13 +59,13 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
                     break
 
                 # Evaluate stability at batch boundary
-                is_stable, current_median = f.check_convergence(variant, previous_median)
-                
+                is_stable, current_median = f.check_convergence(variant_label, previous_median)
+
                 # Don't consider it stable if previous_median was 0 (first batch)
                 if is_stable and previous_median > 0:
-                    log.info(f"Results for {f.name}({variant}) are stable after {total_executions} executions.")
+                    log.info(f"Results for {f.name}({variant_label}) are stable after {total_executions} executions.")
                     break
-                    
+
                 previous_median = current_median
 
     return benchmark
@@ -94,6 +94,12 @@ def measure_time(function: Callable, args=(), kwargs={}):
 def normalised_variants(variants: Any):
     if variants is None:
         yield ((), {}, None)
+    elif isinstance(variants, dict):
+        for name, args in variants.items():
+            if isinstance(args, tuple):
+                yield (args, {}, name)
+            else:
+                yield ((args,), {}, name)
     else: 
         for v in variants:
             # If the user passed a tuple, treat it as the args tuple
