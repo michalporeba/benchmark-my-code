@@ -1,6 +1,6 @@
 [project]
 name = "benchmark-my-code"
-version = "0.0.1"
+version = "0.1.0"
 description = "A simple, even if not the most efficient, way to benchmark code for educational purposes."
 authors = [
     { name = "Michał Poręba", email = "michalporeba@gmail.com" }
@@ -9,6 +9,11 @@ license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/michalporeba/benchmark-my-code"
+Repository = "https://github.com/michalporeba/benchmark-my-code"
+Issues = "https://github.com/michalporeba/benchmark-my-code/issues"
 
 [project.optional-dependencies]
 cli = ["rich>=13.0.0"]
