@@ -72,6 +72,9 @@ def test_challenge_validation_against_reference():
     def broken_student(x):
         return 0 # WRONG! Should be 10
         
-    from benchmark_my_code import InconsistentOutcomesError
-    with pytest.raises(InconsistentOutcomesError):
-        run_benchmarks(validate=True, max_executions=1)
+    from benchmark_my_code import FailureType
+    result = run_benchmarks(validate=True, max_executions=1, warmup_executions=0, print_results=False)
+    
+    func = result.get_function('broken_student')
+    # Use variant label "5" (auto-formatted)
+    assert func.get_status("5") == FailureType.CORRECTNESS

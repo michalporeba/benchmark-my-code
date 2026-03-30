@@ -21,3 +21,10 @@ This document outlines the technical decisions, internal algorithms, and design 
 ## ADR 4: Pluggable Output & Dependency Management
 * **Context**: We want rich visualizations (graphs) in Jupyter notebooks, but we do not want to force CLI users or CI pipelines to install heavy dependencies like `matplotlib` or `pandas`.
 * **Decision**: The core engine returns a standard Python object (`BenchmarkResult`). It includes helper methods (e.g., `.to_dataframe()`) that dynamically import heavy data-science libraries only at runtime if they are available and requested.
+
+## ADR 5: Separation of Engine and Pedagogical Framework (T2CG)
+* **Context**: We want to support structured learning tracks, persistence (unlocking levels), and curriculum management. However, adding stateful persistence and lesson-path logic to the core benchmarking utility would make it heavy, opinionated, and less versatile for ad-hoc use.
+* **Decision**: Draw a clear line of responsibility.
+    * **`benchmark-my-code` (The Engine)**: Will remain a stateless, lightweight benchmarking utility. It handles timing, medians, safety, and contract enforcement.
+    * **`Through The Coding Glass` (T2CG)**: A separate package will be built on top of the engine. It will handle persistence (`.bmc_history.json`), curriculum tracks, gamification (levels), and rich pedagogical content.
+* **Consequence**: `benchmark-my-code` provides raw data and metadata (e.g., `FailureType`) that T2CG can use to manage the student's journey.

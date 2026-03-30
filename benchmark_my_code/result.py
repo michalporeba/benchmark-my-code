@@ -20,9 +20,20 @@ class BenchmarkResult:
                     "median_time": func.median_time(variant),
                     "min_time": func.min_time(variant),
                     "max_time": func.max_time(variant),
-                    "status": func.get_status(variant)
+                    "status": func.get_status(variant),
+                    "peak_memory": func.get_memory(variant)
                 })
         return stats
+
+    def _format_memory(self, bytes_value: float) -> str:
+        if bytes_value <= 0:
+            return "-"
+        if bytes_value < 1024:
+            return f"{bytes_value:.0f} B"
+        elif bytes_value < 1024 * 1024:
+            return f"{bytes_value / 1024:.1f} KB"
+        else:
+            return f"{bytes_value / (1024 * 1024):.1f} MB"
 
     def _format_status(self, status: FailureType) -> str:
         if status == FailureType.NONE:
@@ -45,17 +56,20 @@ class BenchmarkResult:
             table.add_column("Variant", style="magenta")
             table.add_column("Execs", justify="right", style="green")
             table.add_column("Median (s)", justify="right")
+            table.add_column("Memory", justify="right")
             table.add_column("Status", justify="center")
 
             for s in self.stats:
                 status_str = self._format_status(s['status'])
                 style = "red" if s['status'] != FailureType.NONE else "green"
+                mem_str = self._format_memory(s['peak_memory'])
                 
                 table.add_row(
                     s['function'],
                     str(s['variant']),
                     str(s['executions']),
                     f"{s['median_time']:.6f}",
+                    mem_str,
                     f"[{style}]{status_str}[/{style}]"
                 )
                 
@@ -68,13 +82,14 @@ class BenchmarkResult:
             col_func = max(14, max((len(s["function"]) for s in self.stats), default=14))
             col_var = max(7, max((len(str(s["variant"])) for s in self.stats), default=7))
             
-            header = f"{'Function':<{col_func}} | {'Variant':<{col_var}} | {'Execs':<10} | {'Median (s)':<15} | {'Status':<10}"
+            header = f"{'Function':<{col_func}} | {'Variant':<{col_var}} | {'Execs':<10} | {'Median (s)':<12} | {'Memory':<10} | {'Status':<10}"
             divider = "-" * len(header)
             
             lines = [header, divider]
             for s in self.stats:
                 status_str = self._format_status(s['status'])
-                lines.append(f"{s['function']:<{col_func}} | {str(s['variant']):<{col_var}} | {s['executions']:<10} | {s['median_time']:<15.6f} | {status_str:<10}")
+                mem_str = self._format_memory(s['peak_memory'])
+                lines.append(f"{s['function']:<{col_func}} | {str(s['variant']):<{col_var}} | {s['executions']:<10} | {s['median_time']:<12.6f} | {mem_str:<10} | {status_str:<10}")
             output = "\n".join(lines) + "\n"
 
         if self.hints:
@@ -94,19 +109,22 @@ class BenchmarkResult:
         html.append("<th style='padding: 8px;'>Function</th>")
         html.append("<th style='padding: 8px;'>Variant</th>")
         html.append("<th style='padding: 8px; text-align: right;'>Executions</th>")
-        html.append("<th style='padding: 8px; text-align: right;'>Median Time (s)</th>")
+        html.append("<th style='padding: 8px; text-align: right;'>Median (s)</th>")
+        html.append("<th style='padding: 8px; text-align: right;'>Memory</th>")
         html.append("<th style='padding: 8px; text-align: center;'>Status</th>")
         html.append("</tr></thead><tbody>")
         
         for s in self.stats:
             status_str = self._format_status(s['status'])
             color = "#d9534f" if s['status'] != FailureType.NONE else "#5cb85c"
+            mem_str = self._format_memory(s['peak_memory'])
             
             html.append("<tr style='border-bottom: 1px solid #eee;'>")
             html.append(f"<td style='padding: 8px; font-weight: bold;'>{s['function']}</td>")
             html.append(f"<td style='padding: 8px;'><code>{s['variant']}</code></td>")
             html.append(f"<td style='padding: 8px; text-align: right;'>{s['executions']}</td>")
             html.append(f"<td style='padding: 8px; text-align: right;'>{s['median_time']:.6f}</td>")
+            html.append(f"<td style='padding: 8px; text-align: right;'>{mem_str}</td>")
             html.append(f"<td style='padding: 8px; text-align: center; color: white; background-color: {color}; font-size: 0.8em; border-radius: 4px;'>{status_str}</td>")
             html.append("</tr>")
             

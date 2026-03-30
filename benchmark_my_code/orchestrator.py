@@ -7,6 +7,7 @@ import logging
 log = logging.getLogger(__name__)
 
 import copy
+import tracemalloc
 
 def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmup_executions: int = 10, batch_size: int = 10, timeout: float = 100.0) -> Benchmark:
     benchmark = Benchmark()
@@ -68,6 +69,14 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
 
                 previous_median = current_median
 
+            # 3. Perform a separate Memory Pass once timing is stable
+            try:
+                peak_bytes = measure_memory(f._function, copy.deepcopy(args), copy.deepcopy(kwargs))
+                f.record_memory(variant_label, peak_bytes)
+            except Exception:
+                # Memory profiling errors shouldn't crash the whole benchmark
+                pass
+
     return benchmark
 
 def format_parameters(args, kwargs):
@@ -89,6 +98,17 @@ def measure_time(function: Callable, args=(), kwargs={}, timeout=100.0):
     with ThreadPoolExecutor(max_workers=1) as executor: 
         future = executor.submit(test)
         return future.result(timeout=timeout)
+
+
+def measure_memory(function: Callable, args=(), kwargs={}) -> float:
+    """Measures the peak memory usage of a single function call."""
+    tracemalloc.start()
+    try:
+        function(*args, **kwargs)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return float(peak)
 
 
 def normalised_variants(variants: Any):

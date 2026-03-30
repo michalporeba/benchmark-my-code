@@ -34,6 +34,7 @@ class Function:
         self._max_time = {}
         self._min_time = {}
         self._status = {} # Map variant -> FailureType
+        self._peak_memory = {} # Map variant -> float (bytes)
 
     def __call__(self, *args, **kwargs):
         return self._function(*args, **kwargs)
@@ -87,6 +88,7 @@ class Function:
             self._min_time[variant] = time
             self._max_time[variant] = time
             self._status[variant] = FailureType.NONE
+            self._peak_memory[variant] = 0.0
 
         self._executions[variant].append(time)        
         self._total_time[variant] += time 
@@ -102,17 +104,25 @@ class Function:
                 self._min_time[variant] = other._min_time[variant]
                 self._max_time[variant] = other._max_time[variant]
                 self._status[variant] = other._status.get(variant, FailureType.NONE)
+                self._peak_memory[variant] = other._peak_memory.get(variant, 0.0)
             
             self._executions[variant].extend(times)
             self._total_time[variant] += other._total_time[variant]
             self._min_time[variant] = min(self._min_time[variant], other._min_time[variant])
             self._max_time[variant] = max(self._max_time[variant], other._max_time[variant])
+            self._peak_memory[variant] = max(self._peak_memory[variant], other._peak_memory.get(variant, 0.0))
 
     def record_status(self, variant: str, status: FailureType) -> None:
         self._status[variant] = status
 
     def get_status(self, variant: str) -> FailureType:
         return self._status.get(variant, FailureType.NONE)
+
+    def record_memory(self, variant: str, peak_bytes: float) -> None:
+        self._peak_memory[variant] = peak_bytes
+
+    def get_memory(self, variant: str) -> float:
+        return self._peak_memory.get(variant, 0.0)
 
     def check_convergence(self, variant: str, previous_median: float) -> tuple[bool, float]:
         """
