@@ -209,3 +209,5 @@ __marimo__/
 # AI Agent Memory
 MEMORY.md
 memory.json
+.gemini/
+.agents/
