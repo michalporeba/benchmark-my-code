@@ -1,39 +1,68 @@
 from .model import Benchmark, Function
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import time
+import threading
 from typing import Any, Callable
 import logging
 
 log = logging.getLogger(__name__)
+
+JOIN_TIMEOUT = 0.5  # Theory: allow a small window for clean thread exit
 
 import copy
 import tracemalloc
 
 class BenchmarkingWorker:
     _instance = None
+    ORPHAN_THRESHOLD = 5
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(BenchmarkingWorker, cls).__new__(cls)
             cls._instance._executor = ThreadPoolExecutor(max_workers=1)
             cls._instance._stalled = False
+            cls._instance._stop_event = threading.Event()
+            cls._instance._orphan_count = 0
         return cls._instance
 
-    def _reset(self):
-        """Internal method to reset the worker state for tests."""
-        self._executor.shutdown(wait=False)
+    def reset(self):
+        """
+        Public method to reset the worker state. 
+        Attempts to clean up background threads, but may leave orphans if they are in infinite loops.
+        """
+        self._stop_event.set()
+        # Ref: ADR-004 - non-blocking shutdown with cancel_futures=True
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        
+        # JOIN_TIMEOUT theory: Join internal threads to avoid orphans if possible
+        for t in list(getattr(self._executor, "_threads", [])):
+            t.join(timeout=JOIN_TIMEOUT)
+            if t.is_alive():
+                self._orphan_count += 1
+                log.warning(f"Thread {t.name} failed to join and is now an orphan. Total orphans: {self._orphan_count}")
+
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._stalled = False
+        self._stop_event.clear()
 
     def run(self, function: Callable, args=(), kwargs={}, timeout=100.0):
         if self._stalled:
+            if self._orphan_count >= self.ORPHAN_THRESHOLD:
+                raise RuntimeError(
+                    f"Benchmarking engine is TERMINATED. {self._orphan_count} orphaned threads are consuming resources. "
+                    "A full process/kernel restart is now required to ensure system stability."
+                )
             raise RuntimeError(
-                "Benchmarking engine is STALLED due to a previous timeout. "
-                "The background worker is likely stuck in an infinite loop. "
-                "Please restart your Python process or Jupyter kernel to continue."
+                "Benchmarking engine is TERMINATED due to a previous timeout. "
+                "You can attempt to recover by calling `reset()`, but beware that "
+                "the stuck thread will continue to run in the background."
             )
 
         def test_wrapper():
+            # Stop-flag pattern within the worker loop
+            if self._stop_event.is_set():
+                return None
+                
             start_time = time.perf_counter_ns()
             result = function(*args, **kwargs)
             end_time = time.perf_counter_ns()
@@ -45,7 +74,18 @@ class BenchmarkingWorker:
         except TimeoutError:
             self._stalled = True
             log.error("Execution timed out. Worker thread is now STALLED.")
+            
+            # Initiate transition to TERMINATED state
+            self._stop_event.set()
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            for t in list(getattr(self._executor, "_threads", [])):
+                t.join(timeout=JOIN_TIMEOUT)
+                
             raise
+
+def reset():
+    """Reset the global BenchmarkingWorker."""
+    BenchmarkingWorker().reset()
 
 def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmup_executions: int = 10, batch_size: int = 10, timeout: float = 100.0) -> Benchmark:
     benchmark = Benchmark()
