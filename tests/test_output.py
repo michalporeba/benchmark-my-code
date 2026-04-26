@@ -51,3 +51,35 @@ def test_named_variants_output():
     result = run_benchmarks(variants=[(999,)], print_results=False, max_executions=1, warmup_executions=0)
     output = str(result)
     assert "999" in output
+
+def test_benchmark_result_to_dict():
+    bench = Benchmark()
+    func = Function(dummy_func)
+    func.record_execution_time("()", 0.1)
+    bench.add_function(func)
+    
+    result = BenchmarkResult(bench)
+    data = result.to_dict()
+    
+    assert isinstance(data, list)
+    assert len(data) == 1
+    assert data[0]["function"] == "dummy_func"
+    assert data[0]["median_time"] == 0.1
+
+def test_benchmark_result_to_dataframe():
+    bench = Benchmark()
+    func = Function(dummy_func)
+    func.record_execution_time("()", 0.1)
+    bench.add_function(func)
+    
+    result = BenchmarkResult(bench)
+    
+    # Try to import pandas to see if we should expect it to work or fail
+    try:
+        import pandas as pd
+        df = result.to_dataframe()
+        assert isinstance(df, pd.DataFrame)
+    except ImportError:
+        with pytest.raises(ImportError) as excinfo:
+            result.to_dataframe()
+        assert "Pandas is not installed" in str(excinfo.value)

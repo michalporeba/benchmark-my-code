@@ -1,4 +1,5 @@
 import statistics
+import array
 from typing import Any
 from enum import Enum, auto
 
@@ -8,21 +9,6 @@ class FailureType(Enum):
     TIMEOUT = auto()
     EXCEPTION = auto()
     CONSTRAINT = auto()
-
-
-class Variant:
-    def __init__(self, definition: Any):
-        self._name = str(definition)
-
-    @property
-    def name(self):
-        return self._name
-
-    @property
-    def args(self):
-        return None
-
-    
 
 
 class Function:
@@ -83,7 +69,7 @@ class Function:
 
     def record_execution_time(self, variant: str, time: float) -> None:
         if variant not in self._executions:
-            self._executions[variant] = []
+            self._executions[variant] = array.array('d')
             self._total_time[variant] = 0
             self._min_time[variant] = time
             self._max_time[variant] = time
@@ -99,7 +85,7 @@ class Function:
         """Merges execution data from another Function object into this one."""
         for variant, times in other._executions.items():
             if variant not in self._executions:
-                self._executions[variant] = []
+                self._executions[variant] = array.array('d')
                 self._total_time[variant] = 0
                 self._min_time[variant] = other._min_time[variant]
                 self._max_time[variant] = other._max_time[variant]

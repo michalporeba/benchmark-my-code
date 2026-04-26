@@ -140,6 +140,21 @@ class BenchmarkResult:
             
         return "".join(html)
 
+    def to_dict(self) -> List[Dict[str, Any]]:
+        """Returns the benchmark statistics as a list of dictionaries."""
+        return self.stats
+
+    def to_dataframe(self):
+        """
+        Attempts to convert stats into a Pandas DataFrame. 
+        Requires 'pandas' to be installed.
+        """
+        try:
+            import pandas as pd
+            return pd.DataFrame(self.stats)
+        except ImportError:
+            raise ImportError("Pandas is not installed. Run 'pip install pandas' to use .to_dataframe()")
+
     # Pass-through methods to maintain backwards compatibility
     @property
     def functions(self):
