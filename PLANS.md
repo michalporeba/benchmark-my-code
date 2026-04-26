@@ -6,13 +6,25 @@
 - *See: `plans/01-uv-migration.md`*
 
 ## Phase 2: The Core Engine (Completed)
-- [x] **2A: Core Statistics & Timers**: Implement robust measurement (medians over means, tracking min/max). *See: `plans/02a-core-statistics.md`*
-- [x] **2B: Batch Execution & Convergence**: Implement warmups, batch chunking, and 1% stability convergence. *See: `plans/02b-batch-execution.md`*
-- [x] **2C: Ad-Hoc Mode API**: Create `@benchit` decorators, handle multiple functions, and deep-copy inputs. *See: `plans/02c-adhoc-mode.md`*
-- [x] **2D: Pluggable Output**: Build `BenchmarkResult` object, terminal CLI tables, and JSON export. *See: `plans/02d-pluggable-output.md`*
+- [x] **2A: Core Statistics & Timers**: Implement robust measurement (medians over means, tracking min/max).
+- [x] **2B: Batch Execution & Convergence**: Implement warmups, batch chunking, and 1% stability convergence.
+- [x] **2C: Ad-Hoc Mode API**: Create `@benchit` decorators, handle multiple functions, and deep-copy inputs.
+- [x] **2D: Pluggable Output**: Build `BenchmarkResult` object, terminal CLI tables, and JSON export.
 
-## Phase 3: Educational Features
-- [x] **3A: Challenge API & Validation**: `@challenge` decorator, registry, and `inspect`-based signature checking. *See: `plans/03a-challenge-api.md`*
-- [x] **3B: Reference Baselines & Adaptive Timeouts**: Executing hidden reference functions to set a performance ceiling. *See: `plans/03b-adaptive-timeouts.md`*
-- [x] **3C: Staged Feedback & Guidance**: Mapping failures (timeout, correctness, Big-O) to specific student-friendly messages. *See: `plans/03c-pedagogical-feedback.md`*
-- [x] **3D: Adaptive Memory Profiling**: `tracemalloc` integration that only samples at key intervals to sketch the curve. *See: `plans/03d-adaptive-memory.md`*
+## Phase 3: Educational Features (Completed)
+- [x] **3A: Challenge API & Validation**: `@challenge` decorator, registry, and `inspect`-based signature checking.
+- [x] **3B: Reference Baselines & Adaptive Timeouts**: Executing hidden reference functions to set a performance ceiling.
+- [x] **3C: Staged Feedback & Guidance**: Mapping failures (timeout, correctness, Big-O) to specific student-friendly messages.
+- [x] **3D: Adaptive Memory Profiling**: `tracemalloc` integration that only samples at key intervals.
+
+## Phase 4: Hardening & DX (Completed)
+- [x] **Story 1.1**: Efficient Median Selection (Quickselect) & Stat Hygiene.
+- [x] **Story 1.2**: Single-Worker Executor with Stall Detection.
+- [x] **Story 1.3**: Hygienic & Decoupled Memory Pass.
+- [x] **Story 2.1**: `benchit` CLI Runner & Auto-Discovery.
+- [x] **Story 2.2**: Pytest-Style Parametrization via Name Matching.
+- [x] **Story 2.3**: Directed Acyclic Graph (DAG) Parameter Resolution.
+- [x] **Story 3.1**: Lazy-Loaded Statistics for BenchmarkResult.
+- [x] **Story 3.2**: Overhead-Free Optional Dependencies.
+- [x] **Story 4.1**: Adaptive Hardware-Aware Timeouts.
+- [x] **Story 4.2**: Staged Pedagogical Hint Engine.

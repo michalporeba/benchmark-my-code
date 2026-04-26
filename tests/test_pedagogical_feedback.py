@@ -35,6 +35,7 @@ def test_staged_feedback_correctness():
 
 def test_staged_feedback_timeout():
     def slow_ref(n):
+        time.sleep(0.01) # Reference takes 0.01s
         return n
         
     my_chall = Challenge(
@@ -45,7 +46,7 @@ def test_staged_feedback_timeout():
             "Scale": {"Large": (100,)}
         },
         reference=slow_ref,
-        timeout_multiplier=0.1, # Impossible multiplier
+        timeout_multiplier=0.5, # student must be < 0.005s (impossible if they sleep 0.02)
         hints={
             ("Scale", FailureType.TIMEOUT): "Your solution is too slow for large inputs."
         }
@@ -53,7 +54,9 @@ def test_staged_feedback_timeout():
     
     @challenge(my_chall)
     def student_solution(n):
-        time.sleep(0.01) # Wait slightly
+        # Scale stage should timeout
+        if n > 10:
+            time.sleep(0.05)
         return n
         
     result = run_benchmarks(print_results=False, max_executions=1, warmup_executions=0)

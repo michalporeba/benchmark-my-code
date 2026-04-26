@@ -9,8 +9,47 @@ log = logging.getLogger(__name__)
 import copy
 import tracemalloc
 
+class BenchmarkingWorker:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(BenchmarkingWorker, cls).__new__(cls)
+            cls._instance._executor = ThreadPoolExecutor(max_workers=1)
+            cls._instance._stalled = False
+        return cls._instance
+
+    def _reset(self):
+        """Internal method to reset the worker state for tests."""
+        self._executor.shutdown(wait=False)
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._stalled = False
+
+    def run(self, function: Callable, args=(), kwargs={}, timeout=100.0):
+        if self._stalled:
+            raise RuntimeError(
+                "Benchmarking engine is STALLED due to a previous timeout. "
+                "The background worker is likely stuck in an infinite loop. "
+                "Please restart your Python process or Jupyter kernel to continue."
+            )
+
+        def test_wrapper():
+            start_time = time.perf_counter_ns()
+            result = function(*args, **kwargs)
+            end_time = time.perf_counter_ns()
+            return (result, (end_time - start_time) / 1_000_000_000.0)
+
+        future = self._executor.submit(test_wrapper)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            self._stalled = True
+            log.error("Execution timed out. Worker thread is now STALLED.")
+            raise
+
 def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmup_executions: int = 10, batch_size: int = 10, timeout: float = 100.0) -> Benchmark:
     benchmark = Benchmark()
+    worker = BenchmarkingWorker()
 
     # Handle single callable vs iterable of callables
     if callable(functions):
@@ -20,6 +59,8 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
         benchmark.add_function(Function(func))
 
     for f in benchmark.functions:
+        ensure_copy = getattr(f._function, '_bmc_ensure_copy', True)
+        
         log.info(f"Benchmarking function {f.name}")
         for (args, kwargs, name) in normalised_variants(variants):
             variant_label = name or format_parameters(args, kwargs)
@@ -30,7 +71,14 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
                 log.info(f"Warmup: running {warmup_executions} times")
                 for _ in range(warmup_executions):
                     try:
-                        measure_time(f, copy.deepcopy(args), copy.deepcopy(kwargs), timeout=timeout)
+                        # Use individual function's ensure_copy flag
+                        w_args = copy.deepcopy(args) if ensure_copy else args
+                        w_kwargs = copy.deepcopy(kwargs) if ensure_copy else kwargs
+                        worker.run(f._function, w_args, w_kwargs, timeout=timeout)
+                    except TimeoutError:
+                        break
+                    except RuntimeError:
+                        raise
                     except Exception:
                         break
 
@@ -44,13 +92,17 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
                 # Run the batch
                 for _ in range(current_batch_size):
                     try:
-                        (result, run_time) = measure_time(f, copy.deepcopy(args), copy.deepcopy(kwargs), timeout=timeout)
+                        w_args = copy.deepcopy(args) if ensure_copy else args
+                        w_kwargs = copy.deepcopy(kwargs) if ensure_copy else kwargs
+                        (result, run_time) = worker.run(f._function, w_args, w_kwargs, timeout=timeout)
                         f.record_execution_time(variant_label, run_time)
                         total_executions += 1
                     except TimeoutError:
                         f.record_timeout(variant_label)
                         batch_aborted = True
                         break
+                    except RuntimeError:
+                        raise
                     except Exception as e:
                         f.record_exception(variant_label, e)
                         batch_aborted = True
@@ -70,12 +122,16 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
                 previous_median = current_median
 
             # 3. Perform a separate Memory Pass once timing is stable
-            try:
-                peak_bytes = measure_memory(f._function, copy.deepcopy(args), copy.deepcopy(kwargs))
-                f.record_memory(variant_label, peak_bytes)
-            except Exception:
-                # Memory profiling errors shouldn't crash the whole benchmark
-                pass
+            # ONLY if the timing pass succeeded (no timeout/exception)
+            if not batch_aborted:
+                try:
+                    w_args = copy.deepcopy(args) if ensure_copy else args
+                    w_kwargs = copy.deepcopy(kwargs) if ensure_copy else kwargs
+                    peak_bytes = measure_memory(f._function, w_args, w_kwargs)
+                    f.record_memory(variant_label, peak_bytes)
+                except Exception:
+                    # Memory profiling errors shouldn't crash the whole benchmark
+                    pass
 
     return benchmark
 
@@ -87,27 +143,26 @@ def format_parameters(args, kwargs):
     return args_string or kwargs_string
 
 
-def measure_time(function: Callable, args=(), kwargs={}, timeout=100.0):
-    def test():
-        start_time = time.perf_counter_ns()
-        result = function(*args, **kwargs)
-        end_time = time.perf_counter_ns()
-        # Convert nanoseconds to seconds for the final tracked time
-        return (result, (end_time - start_time) / 1_000_000_000.0)
-
-    with ThreadPoolExecutor(max_workers=1) as executor: 
-        future = executor.submit(test)
-        return future.result(timeout=timeout)
-
+import gc
 
 def measure_memory(function: Callable, args=(), kwargs={}) -> float:
-    """Measures the peak memory usage of a single function call."""
+    """
+    Measures the peak memory usage of a single function call in a hygienic way.
+    Story 1.3: Decoupled pass with explicit lifecycle management.
+    """
+    # Force collection of any leftovers before starting
+    gc.collect()
+    
     tracemalloc.start()
+    tracemalloc.clear_traces()
     try:
         function(*args, **kwargs)
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
+        # Clean up after ourselves
+        gc.collect()
+        
     return float(peak)
 
 

@@ -6,10 +6,11 @@ class BenchmarkResult:
     
     def __init__(self, benchmark: Benchmark):
         self._benchmark = benchmark
-        self.stats = self._extract_stats()
         self.hints = []
 
-    def _extract_stats(self) -> List[Dict[str, Any]]:
+    @property
+    def stats(self) -> List[Dict[str, Any]]:
+        """Dynamically extract current statistics from the underlying model."""
         stats = []
         for func in self._benchmark.functions:
             for variant in func._executions.keys():

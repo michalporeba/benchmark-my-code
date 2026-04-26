@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
+[project.scripts]
+benchit = "benchmark_my_code.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/michalporeba/benchmark-my-code"
 Repository = "https://github.com/michalporeba/benchmark-my-code"
