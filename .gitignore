@@ -211,3 +211,4 @@ MEMORY.md
 memory.json
 .gemini/
 .agents/
+graphify-out/
