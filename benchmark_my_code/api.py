@@ -1,5 +1,5 @@
 from typing import Any, Callable, List, Union, Iterable, Dict
-from .orchestrator import bench, normalised_variants, format_parameters, BenchmarkingWorker
+from .orchestrator import bench, normalised_variants, format_parameters, BenchmarkingWorker, run_challenge
 from .model import Challenge, Benchmark, FailureType
 import logging
 import inspect
@@ -113,32 +113,62 @@ def find_user_frame():
     
     frame = sys._getframe(1)
     while frame:
-        frame_file = os.path.abspath(frame.f_code.co_filename)
+        filename = frame.f_code.co_filename
+        # Handle Jupyter/IPython pseudo-files
+        if filename.startswith('<') and filename.endswith('>'):
+            return frame
+            
+        frame_file = os.path.abspath(filename)
         if not frame_file.startswith(package_dir):
             return frame
         frame = frame.f_back
     return None
 
+_VARIANT_CACHE: Dict[str, Any] = {}
+
+def clear_registry():
+    """Clears the global registries."""
+    _GLOBAL_REGISTRY.clear()
+    _CHALLENGE_REGISTRY.clear()
+    _VARIANT_CACHE.clear()
+
+from collections.abc import Iterable
+
 def _resolve_variants_for_func(func: Callable, variants: Any) -> Any:
     """
-    If variants is None, attempts to find a global iterable matching 
+    If variants is None, attempts to find a local/global iterable matching 
     the first parameter name of the function, OR a function matching
     the parameter name that yields data (DAG resolution).
     """
     if variants is not None:
         return variants
     
+    # Story 2.2: Cache resolution by provider name to prevent generator exhaustion
+    # and ensure multiple functions in the same run see the same data.
+    
     # Check if the function has an explicit 'using' attribute from the decorator
     if hasattr(func, '_bmc_using') and func._bmc_using is not None:
         val = func._bmc_using
         if callable(val):
-            provider_result = val()
-            if inspect.isgenerator(provider_result) or isinstance(provider_result, (list, tuple, range)):
-                return provider_result
+            cache_key = f"func:{id(val)}"
+            if cache_key in _VARIANT_CACHE:
+                return _VARIANT_CACHE[cache_key]
+            try:
+                provider_result = val()
+                if isinstance(provider_result, Iterable) and not isinstance(provider_result, (str, bytes)):
+                    res = list(provider_result)
+                    _VARIANT_CACHE[cache_key] = res
+                    return res
+            except Exception:
+                pass
         return val
 
-    sig = inspect.signature(func)
-    params = list(sig.parameters.keys())
+    try:
+        sig = inspect.signature(func)
+        params = list(sig.parameters.keys())
+    except (ValueError, TypeError):
+        # Built-ins or functions without signatures
+        params = []
     
     # Names to look for in order of priority:
     # 1. Each parameter name (e.g. 'data')
@@ -148,22 +178,41 @@ def _resolve_variants_for_func(func: Callable, variants: Any) -> Any:
     # Use robust frame discovery
     frame = find_user_frame()
     while frame:
+        # Search both locals and globals (prioritize locals)
         for name in candidate_names:
-            if name in frame.f_globals:
-                val = frame.f_globals[name]
-                
+            # Check locals first
+            val = frame.f_locals.get(name)
+            if val is None:
+                # Then check globals
+                val = frame.f_globals.get(name)
+            
+            if val is not None:
+                # Use id(val) for caching to handle generators/iterables
+                cache_key = f"var:{id(val)}"
+                if cache_key in _VARIANT_CACHE:
+                    return _VARIANT_CACHE[cache_key]
+
                 # If it's a function, it's a provider
                 if callable(val):
                     # We don't want to call the function being benchmarked itself
                     if val == func:
                         continue
-                    provider_result = val()
-                    if inspect.isgenerator(provider_result) or isinstance(provider_result, (list, tuple, range)):
-                        return provider_result
+                    try:
+                        provider_result = val()
+                        if isinstance(provider_result, Iterable) and not isinstance(provider_result, (str, bytes)):
+                            # Convert to list to prevent generator exhaustion
+                            res = list(provider_result)
+                            _VARIANT_CACHE[cache_key] = res
+                            return res
+                    except Exception:
+                        continue
                 
-                # Simple iterable
-                if isinstance(val, (list, tuple, range)) or inspect.isgenerator(val):
-                    return val
+                # Simple iterable (exclude strings/bytes to avoid accidental character-by-character variants)
+                if isinstance(val, Iterable) and not isinstance(val, (str, bytes)):
+                    # Convert to list to prevent generator exhaustion
+                    res = list(val)
+                    _VARIANT_CACHE[cache_key] = res
+                    return res
         frame = frame.f_back
             
     return None
@@ -258,85 +307,7 @@ def run_benchmarks(variants: Any = None, validate: bool = False, print_results: 
         by_challenge[chall].append(func)
 
     for chall, funcs in by_challenge.items():
-        if print_results:
-            print(f"\n🏆 Running Challenge: {chall.name}")
-
-        # Handle stages vs variants
-        run_stages = chall.stages if chall.stages else {"Default": chall.variants}
-        
-        ref_name = None
-        if chall.reference:
-            ref_func = chall.reference
-            if not hasattr(ref_func, '__name__') or ref_func.__name__ == '<lambda>':
-                ref_func.__name__ = f"Reference_{chall.name.replace(' ', '_')}"
-            ref_name = ref_func.__name__
-
-        stop_challenge = False
-        for stage_name, stage_variants in run_stages.items():
-            if stop_challenge: break
-            
-            if print_results:
-                print(f"  Stage: {stage_name}")
-
-            # Handle generator in stage variants
-            actual_variants = stage_variants
-            if callable(actual_variants):
-                random.seed(42)
-                actual_variants = actual_variants()
-
-            for (args, kwargs_variant, name, expected) in normalised_variants(actual_variants):
-                if stop_challenge: break
-                
-                variant_label = name or format_parameters(args, kwargs_variant)
-                if print_results:
-                    print(f"    - Variant '{variant_label}'...", end="", flush=True)
-
-                current_variant_data = {variant_label: args}
-                
-                adaptive_timeout = 100.0
-                
-                # 2a. Run reference first to establish hardware-specific baseline
-                if chall.reference:
-                    # log.info removed for cleaner CLI output if printing
-                    ref_bench = bench(chall.reference, variants=current_variant_data, **kwargs)
-                    for f in ref_bench.functions:
-                        total_benchmark.add_function(f)
-                    
-                    ref_func_obj = ref_bench.get_function(ref_name)
-                    ref_median = ref_func_obj.median_time(variant_label)
-                    # Set absolute timeout to (reference * multiplier)
-                    adaptive_timeout = max(ref_median * chall.timeout_multiplier, 0.001)
-
-                # 2b. Run student functions
-                chall_bench = bench(funcs, variants=current_variant_data, timeout=adaptive_timeout, **kwargs)
-                
-                if print_results:
-                    print(" DONE")
-                
-                for f in chall_bench.functions:
-                    total_benchmark.add_function(f)
-                    
-                    # Correctness Check against Reference
-                    status = f.get_status(variant_label)
-                    if status == FailureType.NONE and chall.reference:
-                        # Only check correctness if it didn't timeout or crash
-                        try:
-                            worker = BenchmarkingWorker()
-                            ref_res, _ = worker.run(chall.reference, copy.deepcopy(args), copy.deepcopy(kwargs_variant))
-                            student_res, _ = worker.run(f._function, copy.deepcopy(args), copy.deepcopy(kwargs_variant))
-                            if student_res != ref_res:
-                                f.record_status(variant_label, FailureType.CORRECTNESS)
-                                status = FailureType.CORRECTNESS
-                        except Exception:
-                            # If student code crashes during correctness check, it should have been caught by bench
-                            pass
-
-                    # Hint Lookup
-                    if status != FailureType.NONE:
-                        hint = chall.hints.get((stage_name, status))
-                        if hint:
-                            hints.append(hint)
-                            stop_challenge = True # Stop on first hintable failure
+        hints.extend(run_challenge(chall, funcs, total_benchmark, **kwargs))
 
     from .result import BenchmarkResult
     result = BenchmarkResult(total_benchmark)
@@ -344,9 +315,6 @@ def run_benchmarks(variants: Any = None, validate: bool = False, print_results: 
     
     if print_results:
         print(result)
-        
+
     return result
 
-def clear_registry():
-    _GLOBAL_REGISTRY.clear()
-    _CHALLENGE_REGISTRY.clear()

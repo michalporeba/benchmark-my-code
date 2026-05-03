@@ -35,6 +35,35 @@ def test_dag_resolution_from_provider_func():
     func_obj = result.get_function("sum_array")
     assert func_obj.variant_count == 2
 
+def test_generator_exhaustion_prevention():
+    # Use a generator that can only be iterated once
+    data = (i for i in [10, 20])
+    
+    @benchit
+    def func1(data): return data
+    
+    @benchit
+    def func2(data): return data
+    
+    # Run both. If exhaustion occurs, func2 will have 0 variants.
+    result = run_benchmarks(print_results=False, max_executions=1, warmup_executions=0)
+    
+    assert result.get_function("func1").variant_count == 2
+    assert result.get_function("func2").variant_count == 2
+
+def test_local_scope_discovery():
+    def nested():
+        local_data = [1, 2, 3, 4, 5]
+        
+        @benchit
+        def process(local_data):
+            return local_data
+            
+        return run_benchmarks(print_results=False, max_executions=1, warmup_executions=0)
+        
+    result = nested()
+    assert result.get_function("process").variant_count == 5
+
 def test_deepcopy_opt_out():
     class Mutator:
         def __init__(self): self.val = 1

@@ -2,12 +2,15 @@ from .model import Benchmark, Function, FailureType
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import time
 import threading
-from typing import Any, Callable
+import random
+from typing import Any, Callable, List
 import logging
 
 log = logging.getLogger(__name__)
 
 JOIN_TIMEOUT = 0.5  # Theory: allow a small window for clean thread exit
+BASELINE_FLOOR = 0.001 # 1ms floor for adaptive timeouts
+REFERENCE_META_TIMEOUT = 5.0 # Max time to spend on establishing a baseline per variant
 
 import copy
 import tracemalloc
@@ -100,7 +103,7 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
 
     for f in benchmark.functions:
         ensure_copy = getattr(f._function, '_bmc_ensure_copy', True)
-        
+
         log.info(f"Benchmarking function {f.name}")
         for (args, kwargs, variant_label, expected) in normalised_variants(variants):
             log.info(f"testing {f.name}({variant_label})")
@@ -135,7 +138,7 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
                         w_args = copy.deepcopy(args) if ensure_copy else args
                         w_kwargs = copy.deepcopy(kwargs) if ensure_copy else kwargs
                         (last_result, run_time) = worker.run(f._function, w_args, w_kwargs, timeout=timeout)
-                        f.record_execution_time(variant_label, run_time)
+                        f.record_execution_time(variant_label, run_time, result=last_result)
                         total_executions += 1
                     except TimeoutError:
                         f.record_timeout(variant_label)
@@ -182,6 +185,126 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
 
     return benchmark
 
+import inspect
+
+def run_challenge(challenge_obj: Any, student_functions: List[Callable], total_benchmark: Benchmark, **kwargs) -> List[str]:
+    """
+    Orchestrates the execution of a Challenge.
+    Returns a list of hints if any failures occurred.
+    """
+    hints = []
+    print_results = kwargs.get('print_results', True)
+
+    if print_results:
+        print(f"\n🏆 Running Challenge: {challenge_obj.name}")
+
+    # Handle stages vs variants
+    run_stages = getattr(challenge_obj, 'stages', {}) or {"Default": getattr(challenge_obj, 'variants', None)}
+
+    ref_name = None
+    if challenge_obj.reference:
+        ref_func = challenge_obj.reference
+        ref_name = getattr(ref_func, '__name__', None)
+        if not ref_name or ref_name == '<lambda>':
+             ref_name = f"Reference_{challenge_obj.name.replace(' ', '_')}"
+             # We don't mutate ref_func.__name__ as it's cleaner to handle in Function model
+
+    # Discover valid bench args dynamically
+    bench_sig = inspect.signature(bench)
+    valid_bench_keys = {p.name for p in bench_sig.parameters.values() if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
+
+    stop_challenge = False
+    for stage_name, stage_variants in run_stages.items():
+        if stop_challenge: break
+
+        if print_results:
+            print(f"  Stage: {stage_name}")
+
+        # Handle generator in stage variants
+        actual_variants = stage_variants
+        if callable(actual_variants):
+            # Note: We can't easily isolate global random without monkeypatching or 
+            # requiring the generator to accept a Random instance. 
+            # For now, we just call it.
+            actual_variants = actual_variants()
+
+        for (args, kwargs_variant, name, expected) in normalised_variants(actual_variants):
+            if stop_challenge: break
+
+            variant_label = name or format_parameters(args, kwargs_variant)
+            if print_results:
+                print(f"    - Variant '{variant_label}'...", end="", flush=True)
+
+            # Preserve both args and kwargs for variants
+            current_variant_data = {variant_label: {'args': args, 'kwargs': kwargs_variant}}
+            adaptive_timeout = kwargs.get('timeout', 100.0)
+
+            # 2a. Run reference first to establish hardware-specific baseline
+            if challenge_obj.reference:
+                try:
+                    # Establish baseline with a meta-timeout to prevent hanging
+                    bench_args = {k: v for k, v in kwargs.items() if k in valid_bench_keys}
+                    ref_bench = bench(challenge_obj.reference, variants=current_variant_data, timeout=REFERENCE_META_TIMEOUT, **bench_args)
+                    for f in ref_bench.functions:
+                        total_benchmark.add_function(f)
+
+                    ref_func_obj = ref_bench.get_function(ref_name)
+                    if not ref_func_obj:
+                        # Fallback if name identification was complex
+                        ref_func_obj = list(ref_bench.functions)[0] if ref_bench.functions else None
+
+                    # Check if reference actually succeeded
+                    if not ref_func_obj or ref_func_obj.get_status(variant_label) != FailureType.NONE:
+                        status_name = ref_func_obj.get_status(variant_label).name if ref_func_obj else "NOT_FOUND"
+                        if print_results:
+                            print(f" BASELINE FAILURE ({status_name})")
+                        # Mark all student functions as baseline failed for this variant
+                        for s_func in student_functions:
+                            s_name = getattr(s_func, '__name__', str(s_func))
+                            f_model = total_benchmark.get_function(s_name)
+                            if not f_model:
+                                f_model = Function(s_func)
+                                total_benchmark.add_function(f_model)
+                            f_model.record_status(variant_label, FailureType.BASELINE_FAILURE)
+                        continue
+
+                    ref_median = ref_func_obj.median_time(variant_label)
+                    # Set absolute timeout to (reference * multiplier) with a floor
+                    multiplier = getattr(challenge_obj, 'timeout_multiplier', 10.0)
+                    adaptive_timeout = max(ref_median * multiplier, BASELINE_FLOOR)
+
+                    # Use reference output as ground-truth if none provided (Reuse captured result)
+                    if expected is None:
+                        expected = ref_func_obj.get_sample_result(variant_label)
+
+                except Exception as e:
+                    log.error(f"Critical error establishing baseline: {e}")
+                    if print_results:
+                        print(" BASELINE ERROR")
+                    continue
+
+            # 2b. Run student functions
+            # Re-normalise variants to include the 'expected' value from reference if found
+            # Use explicit format to preserve kwargs
+            student_variants = {variant_label: ({'args': args, 'kwargs': kwargs_variant}, expected)}
+            bench_args = {k: v for k, v in kwargs.items() if k in valid_bench_keys}
+            chall_bench = bench(student_functions, variants=student_variants, timeout=adaptive_timeout, **bench_args)
+
+            if print_results:
+                print(" DONE")
+
+            for f in chall_bench.functions:
+                total_benchmark.add_function(f)
+
+                status = f.get_status(variant_label)
+                # Hint Lookup
+                hint = (challenge_obj.hints or {}).get((stage_name, status))
+                if hint:
+                    hints.append(hint)
+                    stop_challenge = True # Stop on first hintable failure
+
+    return hints
+
 def format_parameters(args, kwargs):
     args_string = ", ".join(repr(arg) for arg in args)
     kwargs_string = ", ".join(f"{key}={repr(value)}" for key, value in kwargs.items())
@@ -199,7 +322,7 @@ def measure_memory(function: Callable, args=(), kwargs={}) -> float:
     """
     # Force collection of any leftovers before starting
     gc.collect()
-    
+
     tracemalloc.start()
     tracemalloc.clear_traces()
     try:
@@ -209,7 +332,7 @@ def measure_memory(function: Callable, args=(), kwargs={}) -> float:
         tracemalloc.stop()
         # Clean up after ourselves
         gc.collect()
-        
+
     return float(peak)
 
 
@@ -252,6 +375,8 @@ def normalised_variants(variants: Any):
 def _to_args_kwargs(val: Any) -> tuple[tuple, dict]:
     """Helper to convert a value into (args, kwargs)."""
     if isinstance(val, dict):
+        if 'args' in val or 'kwargs' in val:
+            return val.get('args', ()), val.get('kwargs', {})
         return (), val
     if isinstance(val, tuple):
         return val, {}

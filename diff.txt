@@ -1,0 +1,346 @@
+diff --git a/_bmad-output/implementation-artifacts/sprint-status.yaml b/_bmad-output/implementation-artifacts/sprint-status.yaml
+index a6b0372..301e544 100644
+--- a/_bmad-output/implementation-artifacts/sprint-status.yaml
++++ b/_bmad-output/implementation-artifacts/sprint-status.yaml
+@@ -1,12 +1,12 @@
+ # generated: 2026-04-26 10:15:00
+-# last_updated: 2026-05-03 12:00:00
++# last_updated: 2026-05-03 12:15:00
+ # project: benchmark-my-code
+ # project_key: NOKEY
+ # tracking_system: file-system
+ # story_location: _bmad-output/implementation-artifacts
+ 
+ generated: 2026-04-26 10:15:00
+-last_updated: 2026-05-03 12:00:00
++last_updated: 2026-05-03 12:45:00
+ project: benchmark-my-code
+ project_key: NOKEY
+ tracking_system: file-system
+@@ -30,7 +30,7 @@ development_status:
+   3-2-overhead-free-optional-dependencies: done
+   epic-3-retrospective: optional
+ 
+-  epic-4: backlog
+-  4-1-adaptive-hardware-aware-timeouts: backlog
++  epic-4: in-progress
++  4-1-adaptive-hardware-aware-timeouts: review
+   4-2-staged-pedagogical-hint-engine: backlog
+   epic-4-retrospective: optional
+diff --git a/benchmark_my_code/api.py b/benchmark_my_code/api.py
+index a75ee5d..cbad8a7 100644
+--- a/benchmark_my_code/api.py
++++ b/benchmark_my_code/api.py
+@@ -1,5 +1,5 @@
+ from typing import Any, Callable, List, Union, Iterable, Dict
+-from .orchestrator import bench, normalised_variants, format_parameters, BenchmarkingWorker
++from .orchestrator import bench, normalised_variants, format_parameters, BenchmarkingWorker, run_challenge
+ from .model import Challenge, Benchmark, FailureType
+ import logging
+ import inspect
+@@ -258,85 +258,7 @@ def run_benchmarks(variants: Any = None, validate: bool = False, print_results:
+         by_challenge[chall].append(func)
+ 
+     for chall, funcs in by_challenge.items():
+-        if print_results:
+-            print(f"\n🏆 Running Challenge: {chall.name}")
+-
+-        # Handle stages vs variants
+-        run_stages = chall.stages if chall.stages else {"Default": chall.variants}
+-        
+-        ref_name = None
+-        if chall.reference:
+-            ref_func = chall.reference
+-            if not hasattr(ref_func, '__name__') or ref_func.__name__ == '<lambda>':
+-                ref_func.__name__ = f"Reference_{chall.name.replace(' ', '_')}"
+-            ref_name = ref_func.__name__
+-
+-        stop_challenge = False
+-        for stage_name, stage_variants in run_stages.items():
+-            if stop_challenge: break
+-            
+-            if print_results:
+-                print(f"  Stage: {stage_name}")
+-
+-            # Handle generator in stage variants
+-            actual_variants = stage_variants
+-            if callable(actual_variants):
+-                random.seed(42)
+-                actual_variants = actual_variants()
+-
+-            for (args, kwargs_variant, name, expected) in normalised_variants(actual_variants):
+-                if stop_challenge: break
+-                
+-                variant_label = name or format_parameters(args, kwargs_variant)
+-                if print_results:
+-                    print(f"    - Variant '{variant_label}'...", end="", flush=True)
+-
+-                current_variant_data = {variant_label: args}
+-                
+-                adaptive_timeout = 100.0
+-                
+-                # 2a. Run reference first to establish hardware-specific baseline
+-                if chall.reference:
+-                    # log.info removed for cleaner CLI output if printing
+-                    ref_bench = bench(chall.reference, variants=current_variant_data, **kwargs)
+-                    for f in ref_bench.functions:
+-                        total_benchmark.add_function(f)
+-                    
+-                    ref_func_obj = ref_bench.get_function(ref_name)
+-                    ref_median = ref_func_obj.median_time(variant_label)
+-                    # Set absolute timeout to (reference * multiplier)
+-                    adaptive_timeout = max(ref_median * chall.timeout_multiplier, 0.001)
+-
+-                # 2b. Run student functions
+-                chall_bench = bench(funcs, variants=current_variant_data, timeout=adaptive_timeout, **kwargs)
+-                
+-                if print_results:
+-                    print(" DONE")
+-                
+-                for f in chall_bench.functions:
+-                    total_benchmark.add_function(f)
+-                    
+-                    # Correctness Check against Reference
+-                    status = f.get_status(variant_label)
+-                    if status == FailureType.NONE and chall.reference:
+-                        # Only check correctness if it didn't timeout or crash
+-                        try:
+-                            worker = BenchmarkingWorker()
+-                            ref_res, _ = worker.run(chall.reference, copy.deepcopy(args), copy.deepcopy(kwargs_variant))
+-                            student_res, _ = worker.run(f._function, copy.deepcopy(args), copy.deepcopy(kwargs_variant))
+-                            if student_res != ref_res:
+-                                f.record_status(variant_label, FailureType.CORRECTNESS)
+-                                status = FailureType.CORRECTNESS
+-                        except Exception:
+-                            # If student code crashes during correctness check, it should have been caught by bench
+-                            pass
+-
+-                    # Hint Lookup
+-                    if status != FailureType.NONE:
+-                        hint = chall.hints.get((stage_name, status))
+-                        if hint:
+-                            hints.append(hint)
+-                            stop_challenge = True # Stop on first hintable failure
++        hints.extend(run_challenge(chall, funcs, total_benchmark, **kwargs))
+ 
+     from .result import BenchmarkResult
+     result = BenchmarkResult(total_benchmark)
+diff --git a/benchmark_my_code/model.py b/benchmark_my_code/model.py
+index f23b72a..a136117 100644
+--- a/benchmark_my_code/model.py
++++ b/benchmark_my_code/model.py
+@@ -10,6 +10,7 @@ class FailureType(Enum):
+     TIMEOUT = auto()
+     EXCEPTION = auto()
+     CONSTRAINT = auto()
++    BASELINE_FAILURE = auto()
+ 
+ 
+ class Function:
+diff --git a/benchmark_my_code/orchestrator.py b/benchmark_my_code/orchestrator.py
+index 1a4ec9f..1c21b07 100644
+--- a/benchmark_my_code/orchestrator.py
++++ b/benchmark_my_code/orchestrator.py
+@@ -2,12 +2,15 @@ from .model import Benchmark, Function, FailureType
+ from concurrent.futures import ThreadPoolExecutor, TimeoutError
+ import time
+ import threading
+-from typing import Any, Callable
++import random
++from typing import Any, Callable, List
+ import logging
+ 
+ log = logging.getLogger(__name__)
+ 
+ JOIN_TIMEOUT = 0.5  # Theory: allow a small window for clean thread exit
++BASELINE_FLOOR = 0.001 # 1ms floor for adaptive timeouts
++REFERENCE_META_TIMEOUT = 5.0 # Max time to spend on establishing a baseline per variant
+ 
+ import copy
+ import tracemalloc
+@@ -182,6 +185,114 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
+ 
+     return benchmark
+ 
++def run_challenge(challenge_obj: Any, student_functions: List[Callable], total_benchmark: Benchmark, **kwargs) -> List[str]:
++    """
++    Orchestrates the execution of a Challenge.
++    Returns a list of hints if any failures occurred.
++    """
++    hints = []
++    print_results = kwargs.get('print_results', True)
++    
++    if print_results:
++        print(f"\n🏆 Running Challenge: {challenge_obj.name}")
++
++    # Handle stages vs variants
++    run_stages = challenge_obj.stages if challenge_obj.stages else {"Default": challenge_obj.variants}
++    
++    ref_name = None
++    if challenge_obj.reference:
++        ref_func = challenge_obj.reference
++        if not hasattr(ref_func, '__name__') or ref_func.__name__ == '<lambda>':
++            ref_func.__name__ = f"Reference_{challenge_obj.name.replace(' ', '_')}"
++        ref_name = ref_func.__name__
++
++    stop_challenge = False
++    for stage_name, stage_variants in run_stages.items():
++        if stop_challenge: break
++        
++        if print_results:
++            print(f"  Stage: {stage_name}")
++
++        # Handle generator in stage variants
++        actual_variants = stage_variants
++        if callable(actual_variants):
++            random.seed(42)
++            actual_variants = actual_variants()
++
++        for (args, kwargs_variant, name, expected) in normalised_variants(actual_variants):
++            if stop_challenge: break
++            
++            variant_label = name or format_parameters(args, kwargs_variant)
++            if print_results:
++                print(f"    - Variant '{variant_label}'...", end="", flush=True)
++
++            current_variant_data = {variant_label: args}
++            adaptive_timeout = kwargs.get('timeout', 100.0)
++            
++            # 2a. Run reference first to establish hardware-specific baseline
++            if challenge_obj.reference:
++                try:
++                    # Establish baseline with a meta-timeout to prevent hanging
++                    # Filter kwargs to only pass what bench() expects
++                    bench_args = {k: v for k, v in kwargs.items() if k in ('max_executions', 'warmup_executions', 'batch_size')}
++                    ref_bench = bench(challenge_obj.reference, variants=current_variant_data, timeout=REFERENCE_META_TIMEOUT, **bench_args)
++                    for f in ref_bench.functions:
++                        total_benchmark.add_function(f)
++                    
++                    ref_func_obj = ref_bench.get_function(ref_name)
++                    
++                    # Check if reference actually succeeded
++                    if ref_func_obj.get_status(variant_label) != FailureType.NONE:
++                        if print_results:
++                            print(f" BASELINE FAILURE ({ref_func_obj.get_status(variant_label).name})")
++                        # Mark all student functions as baseline failed for this variant
++                        for s_func in student_functions:
++                            # We create a dummy function object if it doesn't exist
++                            f_model = total_benchmark.get_function(s_func.__name__)
++                            if not f_model:
++                                f_model = Function(s_func)
++                                total_benchmark.add_function(f_model)
++                            f_model.record_status(variant_label, FailureType.BASELINE_FAILURE)
++                        continue
++
++                    ref_median = ref_func_obj.median_time(variant_label)
++                    # Set absolute timeout to (reference * multiplier) with a floor
++                    adaptive_timeout = max(ref_median * challenge_obj.timeout_multiplier, BASELINE_FLOOR)
++                    
++                    # Use reference output as ground-truth if none provided
++                    if expected is None:
++                        worker = BenchmarkingWorker()
++                        expected, _ = worker.run(challenge_obj.reference, copy.deepcopy(args), copy.deepcopy(kwargs_variant))
++
++                except Exception as e:
++                    log.error(f"Critical error establishing baseline: {e}")
++                    if print_results:
++                        print(" BASELINE ERROR")
++                    continue
++
++            # 2b. Run student functions
++            # Re-normalise variants to include the 'expected' value from reference if found
++            student_variants = {variant_label: (args, expected)}
++            # Filter kwargs again
++            bench_args = {k: v for k, v in kwargs.items() if k in ('max_executions', 'warmup_executions', 'batch_size')}
++            chall_bench = bench(student_functions, variants=student_variants, timeout=adaptive_timeout, **bench_args)
++            
++            if print_results:
++                print(" DONE")
++            
++            for f in chall_bench.functions:
++                total_benchmark.add_function(f)
++                
++                status = f.get_status(variant_label)
++                # Hint Lookup
++                if status != FailureType.NONE:
++                    hint = challenge_obj.hints.get((stage_name, status))
++                    if hint:
++                        hints.append(hint)
++                        stop_challenge = True # Stop on first hintable failure
++
++    return hints
++
+ def format_parameters(args, kwargs):
+     args_string = ", ".join(repr(arg) for arg in args)
+     kwargs_string = ", ".join(f"{key}={repr(value)}" for key, value in kwargs.items())
+import pytest
+import time
+from benchmark_my_code.orchestrator import run_challenge
+from benchmark_my_code.model import Challenge, Benchmark, FailureType
+
+def test_malformed_reference_fails_gracefully():
+    # A reference that crashes
+    def ref(x): raise ValueError("Ref Crash")
+    chall = Challenge("Crash Test", ["x"], variants=[(1,)], reference=ref)
+    
+    def student(x): return x
+    
+    benchmark = Benchmark()
+    run_challenge(chall, [student], benchmark, print_results=False)
+    
+    # Student should be marked with BASELINE_FAILURE
+    f_student = benchmark.get_function("student")
+    # variant label for (1,) is '1'
+    assert f_student.get_status('1') == FailureType.BASELINE_FAILURE
+
+def test_extremely_fast_reference_honors_floor():
+    # A reference that is nearly instantaneous
+    def ref(x): return x
+    # Multiplier 0.1 of 0s would be 0s, but floor is 1ms
+    chall = Challenge("Fast Test", ["x"], variants=[(1,)], reference=ref, timeout_multiplier=0.1)
+    
+    # Student takes 0.005s (5ms)
+    def student(x):
+        time.sleep(0.005)
+        return x
+    
+    benchmark = Benchmark()
+    run_challenge(chall, [student], benchmark, print_results=False, max_executions=1, warmup_executions=0)
+    
+    f_student = benchmark.get_function("student")
+    # 5ms > 1ms floor -> Timeout
+    assert f_student.get_status('1') == FailureType.TIMEOUT
+
+def test_multiplier_less_than_one_enforcement():
+    # Reference takes 0.02s
+    def ref(x):
+        time.sleep(0.02)
+        return x
+    
+    # Student has 0.5x multiplier -> 0.01s timeout
+    chall = Challenge("Strict Test", ["x"], variants=[(1,)], reference=ref, timeout_multiplier=0.5)
+    
+    # Student takes 0.015s
+    def student(x):
+        time.sleep(0.015)
+        return x
+        
+    benchmark = Benchmark()
+    run_challenge(chall, [student], benchmark, print_results=False, max_executions=1, warmup_executions=0)
+    
+    f_student = benchmark.get_function("student")
+    assert f_student.get_status('1') == FailureType.TIMEOUT
+
+def test_correctness_by_default_from_reference():
+    # No 'expected' provided in variants
+    def ref(x): return x * 2
+    chall = Challenge("Correctness Test", ["x"], variants=[(10,)], reference=ref)
+    
+    # Student returns wrong value
+    def student(x): return x + 1 # 20 != 11 for x=10
+    
+    benchmark = Benchmark()
+    run_challenge(chall, [student], benchmark, print_results=False, max_executions=1, warmup_executions=0)
+    
+    f_student = benchmark.get_function("student")
+    assert f_student.get_status('10') == FailureType.CORRECTNESS

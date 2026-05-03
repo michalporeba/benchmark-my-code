@@ -55,28 +55,41 @@ def load_benchmarks_safely(file_path: str):
     tree = ast.parse(source)
     
     # Filter top-level nodes: keep only imports, classes, and functions.
-    # We also keep assignments to standard parametrization names like 'data', 'scenarios'.
+    # We also keep assignments to standard parametrization names like 'data', 'scenarios'
+    # BUT only if the value being assigned is a simple literal or data structure (no side-effect calls).
     safe_nodes = []
     allowed_params = ["data", "scenarios"]
     
+    def is_safe_value(node):
+        """Checks if an AST node is a 'safe' value (no side-effect calls)."""
+        if isinstance(node, (ast.Constant, ast.List, ast.Dict, ast.Tuple, ast.Set, ast.Name)):
+            return True
+        # Allow simple calls to generators or providers if they are just names
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            return True
+        return False
+
     for node in tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             safe_nodes.append(node)
         elif isinstance(node, ast.Assign):
-            # Keep if it assigns to one of the allowed parameter names
+            # Keep if it assigns to one of the allowed parameter names AND value is safe
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id in allowed_params:
-                    safe_nodes.append(node)
-                    break
+                    if is_safe_value(node.value):
+                        safe_nodes.append(node)
+                        break
         elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
             # Keep if it's a call to @benchit or @challenge (though they are usually decorators)
-            # This handles cases where people might use them as functions
             pass 
 
     tree.body = safe_nodes
     
-    # Create a new module object
-    module_name = os.path.splitext(os.path.basename(file_path))[0]
+    # Create a unique module name to avoid collisions (e.g., multiple 'bench.py' files)
+    import hashlib
+    file_hash = hashlib.md5(file_path.encode()).hexdigest()[:8]
+    module_name = f"bench_module_{file_hash}"
+    
     module = importlib.util.module_from_spec(
         importlib.util.spec_from_file_location(module_name, file_path)
     )

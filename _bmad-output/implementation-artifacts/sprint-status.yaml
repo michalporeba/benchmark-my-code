@@ -1,12 +1,12 @@
 # generated: 2026-04-26 10:15:00
-# last_updated: 2026-05-03 12:00:00
+# last_updated: 2026-05-03 12:15:00
 # project: benchmark-my-code
 # project_key: NOKEY
 # tracking_system: file-system
 # story_location: _bmad-output/implementation-artifacts
 
 generated: 2026-04-26 10:15:00
-last_updated: 2026-05-03 12:00:00
+last_updated: 2026-05-03 12:45:00
 project: benchmark-my-code
 project_key: NOKEY
 tracking_system: file-system
@@ -20,7 +20,7 @@ development_status:
   epic-1-retrospective: optional
 
   epic-2: in-progress
-  2-1-the-benchit-cli-runner-discovery: review
+  2-1-the-benchit-cli-runner-discovery: in-progress
   2-2-pytest-style-parametrization-via-name-matching: done
   2-3-directed-acyclic-graph-dag-parameter-resolution: done
   epic-2-retrospective: optional
@@ -30,7 +30,7 @@ development_status:
   3-2-overhead-free-optional-dependencies: done
   epic-3-retrospective: optional
 
-  epic-4: backlog
-  4-1-adaptive-hardware-aware-timeouts: backlog
+  epic-4: in-progress
+  4-1-adaptive-hardware-aware-timeouts: review
   4-2-staged-pedagogical-hint-engine: backlog
   epic-4-retrospective: optional

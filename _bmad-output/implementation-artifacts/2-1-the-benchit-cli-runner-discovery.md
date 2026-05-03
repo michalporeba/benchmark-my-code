@@ -1,6 +1,6 @@
 # Story 2.1: The benchit CLI runner & Discovery
 
-Status: review
+Status: in-progress
 
 ## Story
 
@@ -75,3 +75,15 @@ Gemini 2.0 Flash
 - `tests/test_cli.py`
 - `tests/test_cli_discovery_internal.py`
 - `tests/test_cli_side_effects.py`
+
+### Review Findings
+
+- [ ] [Review][Patch] Side-effect suppression bypass [benchmark_my_code/cli.py:63-87]
+- [ ] [Review][Patch] Unbounded sys.path growth [benchmark_my_code/cli.py:97-99]
+- [ ] [Review][Patch] Inefficient ad-hoc correctness check [benchmark_my_code/api.py:236-247]
+- [ ] [Review][Patch] Potential deepcopy overhead [benchmark_my_code/api.py:243-244]
+- [ ] [Review][Patch] Jupyter/IPython frame discovery failure [benchmark_my_code/api.py:113]
+- [ ] [Review][Patch] Module name collisions in CLI [benchmark_my_code/cli.py:90]
+- [ ] [Review][Patch] Initialization of last_result in orchestrator [benchmark_my_code/orchestrator.py:126, 154]
+- [ ] [Review][Patch] Normalised variants tuple handling [benchmark_my_code/orchestrator.py:249-254]
+- [x] [Review][Defer] sys._getframe dependency [benchmark_my_code/api.py:111] — deferred, pre-existing

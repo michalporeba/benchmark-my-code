@@ -10,11 +10,15 @@ class FailureType(Enum):
     TIMEOUT = auto()
     EXCEPTION = auto()
     CONSTRAINT = auto()
+    BASELINE_FAILURE = auto()
 
 
 class Function:
     def __init__(self, function: callable):
-        self._name = function.__name__
+        self._name = getattr(function, '__name__', str(function))
+        if self._name == '<lambda>':
+            # Try to get more info for lambdas if possible, but keep it unique-ish
+            self._name = f"lambda_{id(function)}"
         self._function = function
         self._executions = {} 
         self._total_time = {}
@@ -22,6 +26,7 @@ class Function:
         self._min_time = {}
         self._status = {} # Map variant -> FailureType
         self._peak_memory = {} # Map variant -> float (bytes)
+        self._sample_result = {} # Map variant -> Any
 
     def __call__(self, *args, **kwargs):
         return self._function(*args, **kwargs)
@@ -123,7 +128,7 @@ class Function:
                 left = store_index + 1
         return 0.0
 
-    def record_execution_time(self, variant: str, time: float) -> None:
+    def record_execution_time(self, variant: str, time: float, result: Any = None) -> None:
         if variant not in self._executions:
             self._executions[variant] = array.array('d')
             self._total_time[variant] = 0
@@ -131,6 +136,7 @@ class Function:
             self._max_time[variant] = time
             self._status[variant] = FailureType.NONE
             self._peak_memory[variant] = 0.0
+            self._sample_result[variant] = result
 
         self._executions[variant].append(time)        
         self._total_time[variant] += time 
@@ -147,6 +153,7 @@ class Function:
                 self._max_time[variant] = other._max_time[variant]
                 self._status[variant] = other._status.get(variant, FailureType.NONE)
                 self._peak_memory[variant] = other._peak_memory.get(variant, 0.0)
+                self._sample_result[variant] = other._sample_result.get(variant)
             
             self._executions[variant].extend(times)
             self._total_time[variant] += other._total_time[variant]
@@ -165,6 +172,9 @@ class Function:
 
     def get_memory(self, variant: str) -> float:
         return self._peak_memory.get(variant, 0.0)
+
+    def get_sample_result(self, variant: str) -> Any:
+        return self._sample_result.get(variant)
 
     def check_convergence(self, variant: str, previous_median: float) -> tuple[bool, float]:
         """
