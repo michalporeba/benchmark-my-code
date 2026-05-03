@@ -9,6 +9,10 @@ class BenchmarkResult:
         self.hints = []
 
     @property
+    def benchmark(self) -> Benchmark:
+        return self._benchmark
+
+    @property
     def stats(self) -> List[Dict[str, Any]]:
         """Dynamically extract current statistics from the underlying model."""
         stats = []
@@ -39,6 +43,8 @@ class BenchmarkResult:
     def _format_status(self, status: FailureType) -> str:
         if status == FailureType.NONE:
             return "PASS"
+        if status == FailureType.PENDING:
+            return "PENDING"
         return status.name
 
     def __str__(self):
@@ -62,7 +68,12 @@ class BenchmarkResult:
 
             for s in self.stats:
                 status_str = self._format_status(s['status'])
-                style = "red" if s['status'] != FailureType.NONE else "green"
+                style = "green"
+                if s['status'] == FailureType.PENDING:
+                    style = "yellow"
+                elif s['status'] != FailureType.NONE:
+                    style = "red"
+                
                 mem_str = self._format_memory(s['peak_memory'])
                 
                 table.add_row(
@@ -117,7 +128,12 @@ class BenchmarkResult:
         
         for s in self.stats:
             status_str = self._format_status(s['status'])
-            color = "#d9534f" if s['status'] != FailureType.NONE else "#5cb85c"
+            color = "#5cb85c"
+            if s['status'] == FailureType.PENDING:
+                color = "#f0ad4e"
+            elif s['status'] != FailureType.NONE:
+                color = "#d9534f"
+            
             mem_str = self._format_memory(s['peak_memory'])
             
             html.append("<tr style='border-bottom: 1px solid #eee;'>")

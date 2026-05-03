@@ -5,6 +5,7 @@ from enum import Enum, auto
 
 class FailureType(Enum):
     NONE = auto()
+    PENDING = auto()
     CORRECTNESS = auto()
     TIMEOUT = auto()
     EXCEPTION = auto()

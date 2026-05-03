@@ -18,4 +18,4 @@ def test_cli_file_not_found():
     cmd = ["uv", "run", "benchit", "non_existent_file.py"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     assert result.returncode == 1
-    assert "Error: File 'non_existent_file.py' not found." in result.stdout
+    assert "Error: Path 'non_existent_file.py' not found." in result.stdout

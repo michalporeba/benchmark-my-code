@@ -1,4 +1,4 @@
-from .model import Benchmark, Function
+from .model import Benchmark, Function, FailureType
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import time
 import threading
@@ -102,8 +102,7 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
         ensure_copy = getattr(f._function, '_bmc_ensure_copy', True)
         
         log.info(f"Benchmarking function {f.name}")
-        for (args, kwargs, name) in normalised_variants(variants):
-            variant_label = name or format_parameters(args, kwargs)
+        for (args, kwargs, variant_label, expected) in normalised_variants(variants):
             log.info(f"testing {f.name}({variant_label})")
 
             # Warmup
@@ -124,6 +123,7 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
 
             total_executions = 0
             previous_median = 0.0
+            last_result = None
 
             while total_executions < max_executions:
                 current_batch_size = min(batch_size, max_executions - total_executions)
@@ -134,7 +134,7 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
                     try:
                         w_args = copy.deepcopy(args) if ensure_copy else args
                         w_kwargs = copy.deepcopy(kwargs) if ensure_copy else kwargs
-                        (result, run_time) = worker.run(f._function, w_args, w_kwargs, timeout=timeout)
+                        (last_result, run_time) = worker.run(f._function, w_args, w_kwargs, timeout=timeout)
                         f.record_execution_time(variant_label, run_time)
                         total_executions += 1
                     except TimeoutError:
@@ -150,6 +150,13 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
 
                 if batch_aborted:
                     break
+
+                # Ground Truth Validation (if expected value is provided in variant)
+                if expected is not None:
+                    if last_result != expected:
+                        f.record_status(variant_label, FailureType.CORRECTNESS)
+                        batch_aborted = True
+                        break
 
                 # Evaluate stability at batch boundary
                 is_stable, current_median = f.check_convergence(variant_label, previous_median)
@@ -207,19 +214,45 @@ def measure_memory(function: Callable, args=(), kwargs={}) -> float:
 
 
 def normalised_variants(variants: Any):
+    """
+    Normalises variants into a standard format: (args, kwargs, label, expected_result)
+
+    Supports:
+    - [1, 2, 3] -> ((1,), {}, '1', None), ...
+    - {'v1': 1, 'v2': 2} -> ((1,), {}, 'v1', None), ...
+    - [( (1,2), 3 ), ( (3,4), 7 )] -> ((1,2), {}, '(1, 2)', 3), ... (Scenarios)
+    """
     if variants is None:
-        yield ((), {}, None)
-    elif isinstance(variants, dict):
-        for name, args in variants.items():
-            if isinstance(args, tuple):
-                yield (args, {}, name)
+        yield ((), {}, None, None)
+        return
+
+    if isinstance(variants, dict):
+        for name, val in variants.items():
+            # Check if val is a scenario tuple (input, expected)
+            if isinstance(val, tuple) and len(val) == 2:
+                inputs, expected = val
+                args, kwargs = _to_args_kwargs(inputs)
+                yield (args, kwargs, name, expected)
             else:
-                yield ((args,), {}, name)
-    else: 
+                args, kwargs = _to_args_kwargs(val)
+                yield (args, kwargs, name, None)
+    else:
         for v in variants:
-            # If the user passed a tuple, treat it as the args tuple
-            if isinstance(v, tuple):
-                yield (v, {}, None)
+            # Check for (input, expected) tuple
+            if isinstance(v, tuple) and len(v) == 2:
+                inputs, expected = v
+                args, kwargs = _to_args_kwargs(inputs)
+                label = format_parameters(args, kwargs)
+                yield (args, kwargs, label, expected)
             else:
-                # Otherwise, wrap the single value in a tuple
-                yield ((v,), {}, None)
+                args, kwargs = _to_args_kwargs(v)
+                label = format_parameters(args, kwargs)
+                yield (args, kwargs, label, None)
+
+def _to_args_kwargs(val: Any) -> tuple[tuple, dict]:
+    """Helper to convert a value into (args, kwargs)."""
+    if isinstance(val, dict):
+        return (), val
+    if isinstance(val, tuple):
+        return val, {}
+    return (val,), {}

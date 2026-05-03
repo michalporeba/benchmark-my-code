@@ -26,16 +26,21 @@ class ForbiddenCallError(Exception):
 def benchit(arg: Union[Callable, bool] = True, **kwargs) -> Callable:
     """
     Decorator to register a function for ad-hoc benchmarking.
-    Can be used as @benchit or @benchit(ensure_copy=False).
+    Can be used as @benchit, @benchit(using=data), or @benchit(is_reference=True).
     """
     ensure_copy = kwargs.get('ensure_copy', arg if isinstance(arg, bool) else True)
+    using = kwargs.get('using')
+    is_reference = kwargs.get('is_reference', False)
     
     def decorator(func: Callable) -> Callable:
         func._bmc_ensure_copy = ensure_copy
+        func._bmc_using = using
+        func._bmc_is_reference = is_reference
         _GLOBAL_REGISTRY.append(func)
         return func
 
     if callable(arg):
+        # We need to set default using/is_reference if used as bare @benchit
         return decorator(arg)
     
     return decorator
@@ -97,6 +102,23 @@ def challenge(challenge_obj: Challenge):
         return func
     return decorator
 
+def find_user_frame():
+    """
+    Walks back the stack to find the first frame that is not in the benchmark_my_code package.
+    This is robust against wrappers and different execution environments (Jupyter, etc.).
+    """
+    import os
+    # Get the directory of the current file (api.py)
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    frame = sys._getframe(1)
+    while frame:
+        frame_file = os.path.abspath(frame.f_code.co_filename)
+        if not frame_file.startswith(package_dir):
+            return frame
+        frame = frame.f_back
+    return None
+
 def _resolve_variants_for_func(func: Callable, variants: Any) -> Any:
     """
     If variants is None, attempts to find a global iterable matching 
@@ -106,28 +128,42 @@ def _resolve_variants_for_func(func: Callable, variants: Any) -> Any:
     if variants is not None:
         return variants
     
+    # Check if the function has an explicit 'using' attribute from the decorator
+    if hasattr(func, '_bmc_using') and func._bmc_using is not None:
+        val = func._bmc_using
+        if callable(val):
+            provider_result = val()
+            if inspect.isgenerator(provider_result) or isinstance(provider_result, (list, tuple, range)):
+                return provider_result
+        return val
+
     sig = inspect.signature(func)
     params = list(sig.parameters.keys())
-    if not params:
-        return None
-        
-    param_name = params[0]
     
-    # Look for param_name in the caller's scope
-    frame = sys._getframe(2)
+    # Names to look for in order of priority:
+    # 1. Each parameter name (e.g. 'data')
+    # 2. 'scenarios' (global standard name)
+    candidate_names = params + ['scenarios']
+    
+    # Use robust frame discovery
+    frame = find_user_frame()
     while frame:
-        if param_name in frame.f_globals:
-            val = frame.f_globals[param_name]
-            
-            # Story 2.3: If it's a function, it's a provider
-            if callable(val):
-                provider_result = val()
-                if inspect.isgenerator(provider_result) or isinstance(provider_result, (list, tuple, range)):
-                    return provider_result
-            
-            # Story 2.2: Simple iterable
-            if isinstance(val, (list, tuple, range)) or inspect.isgenerator(val):
-                return val
+        for name in candidate_names:
+            if name in frame.f_globals:
+                val = frame.f_globals[name]
+                
+                # If it's a function, it's a provider
+                if callable(val):
+                    # We don't want to call the function being benchmarked itself
+                    if val == func:
+                        continue
+                    provider_result = val()
+                    if inspect.isgenerator(provider_result) or isinstance(provider_result, (list, tuple, range)):
+                        return provider_result
+                
+                # Simple iterable
+                if isinstance(val, (list, tuple, range)) or inspect.isgenerator(val):
+                    return val
         frame = frame.f_back
             
     return None
@@ -146,16 +182,18 @@ def run_benchmarks(variants: Any = None, validate: bool = False, print_results: 
 
     # 1. Run Ad-hoc benchmarks
     if _GLOBAL_REGISTRY:
+        if print_results:
+            print("\n🚀 Running Ad-hoc Benchmarks...")
+
         if validate:
+            if print_results:
+                print("  Validating outcomes across all registered functions...")
             # For validation, we need a common variant set. 
-            # If variants is None, we can only validate if ALL functions 
-            # have matching param names. For simplicity, if validate=True,
-            # we expect variants to be provided or we use the first function's resolution.
             common_variants = variants
             if common_variants is None and _GLOBAL_REGISTRY:
                 common_variants = _resolve_variants_for_func(_GLOBAL_REGISTRY[0], None)
             
-            for (args, kwargs_variant, name) in normalised_variants(common_variants):
+            for (args, kwargs_variant, name, expected) in normalised_variants(common_variants):
                 results = {}
                 for func in _GLOBAL_REGISTRY:
                     safe_args = copy.deepcopy(args)
@@ -175,10 +213,40 @@ def run_benchmarks(variants: Any = None, validate: bool = False, print_results: 
                         error_msg += f"  {f_name} -> {res}\n"
                     raise InconsistentOutcomesError(error_msg)
 
+        # Identify reference function if any
+        ref_func = next((f for f in _GLOBAL_REGISTRY if getattr(f, '_bmc_is_reference', False)), None)
+        
         for func in _GLOBAL_REGISTRY:
+            if print_results:
+                ref_tag = " [Reference]" if getattr(func, '_bmc_is_reference', False) else ""
+                print(f"  - Benchmarking '{func.__name__}'{ref_tag}...", end="", flush=True)
+
             # Resolve variants for THIS function specifically if none provided globally
             func_variants = _resolve_variants_for_func(func, variants)
+            
+            # ...
+            
             adhoc_bench = bench(func, variants=func_variants, **kwargs)
+            
+            if print_results:
+                print(" DONE")
+            
+            # Correctness Check against Reference (if reference exists and is NOT this function)
+            if ref_func and func != ref_func:
+                for f_model in adhoc_bench.functions:
+                    for variant_label in list(f_model._status.keys()):
+                        if f_model.get_status(variant_label) == FailureType.NONE:
+                            # Re-run both to compare (inefficient but safe for ad-hoc)
+                            # Actual variants for this label:
+                            for (args, kwargs_v, label, expected) in normalised_variants(func_variants):
+                                if label == variant_label:
+                                    worker = BenchmarkingWorker()
+                                    ref_res, _ = worker.run(ref_func, copy.deepcopy(args), copy.deepcopy(kwargs_v))
+                                    student_res, _ = worker.run(func, copy.deepcopy(args), copy.deepcopy(kwargs_v))
+                                    if student_res != ref_res:
+                                        f_model.record_status(variant_label, FailureType.CORRECTNESS)
+                                    break
+
             for f in adhoc_bench.functions:
                 total_benchmark.add_function(f)
 
@@ -190,6 +258,9 @@ def run_benchmarks(variants: Any = None, validate: bool = False, print_results: 
         by_challenge[chall].append(func)
 
     for chall, funcs in by_challenge.items():
+        if print_results:
+            print(f"\n🏆 Running Challenge: {chall.name}")
+
         # Handle stages vs variants
         run_stages = chall.stages if chall.stages else {"Default": chall.variants}
         
@@ -204,23 +275,29 @@ def run_benchmarks(variants: Any = None, validate: bool = False, print_results: 
         for stage_name, stage_variants in run_stages.items():
             if stop_challenge: break
             
+            if print_results:
+                print(f"  Stage: {stage_name}")
+
             # Handle generator in stage variants
             actual_variants = stage_variants
             if callable(actual_variants):
                 random.seed(42)
                 actual_variants = actual_variants()
 
-            for (args, kwargs_variant, name) in normalised_variants(actual_variants):
+            for (args, kwargs_variant, name, expected) in normalised_variants(actual_variants):
                 if stop_challenge: break
                 
                 variant_label = name or format_parameters(args, kwargs_variant)
+                if print_results:
+                    print(f"    - Variant '{variant_label}'...", end="", flush=True)
+
                 current_variant_data = {variant_label: args}
                 
                 adaptive_timeout = 100.0
                 
                 # 2a. Run reference first to establish hardware-specific baseline
                 if chall.reference:
-                    log.info(f"Establishing baseline for challenge '{chall.name}' using reference implementation...")
+                    # log.info removed for cleaner CLI output if printing
                     ref_bench = bench(chall.reference, variants=current_variant_data, **kwargs)
                     for f in ref_bench.functions:
                         total_benchmark.add_function(f)
@@ -229,10 +306,12 @@ def run_benchmarks(variants: Any = None, validate: bool = False, print_results: 
                     ref_median = ref_func_obj.median_time(variant_label)
                     # Set absolute timeout to (reference * multiplier)
                     adaptive_timeout = max(ref_median * chall.timeout_multiplier, 0.001)
-                    log.info(f"Baseline median: {ref_median:.6f}s. Setting adaptive timeout to {adaptive_timeout:.6f}s")
 
                 # 2b. Run student functions
                 chall_bench = bench(funcs, variants=current_variant_data, timeout=adaptive_timeout, **kwargs)
+                
+                if print_results:
+                    print(" DONE")
                 
                 for f in chall_bench.functions:
                     total_benchmark.add_function(f)
