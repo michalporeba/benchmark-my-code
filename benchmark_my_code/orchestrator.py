@@ -243,12 +243,21 @@ def run_challenge(challenge_obj: Any, student_functions: List[Callable], total_b
             if challenge_obj.reference:
                 try:
                     # Establish baseline with a meta-timeout to prevent hanging
-                    bench_args = {k: v for k, v in kwargs.items() if k in valid_bench_keys}
+                    bench_args = {k: v for k, v in kwargs.items() if k in valid_bench_keys and k != 'timeout'}
+                    
                     ref_bench = bench(challenge_obj.reference, variants=current_variant_data, timeout=REFERENCE_META_TIMEOUT, **bench_args)
-                    for f in ref_bench.functions:
+                    
+                    # Important: Update the function name in ref_bench to match ref_name and add to total
+                    ref_func_obj = None
+                    for f in list(ref_bench.functions):
+                        # Force the name to match what we expect for a reference
+                        f._name = ref_name
                         total_benchmark.add_function(f)
+                        ref_func_obj = f
+                    
+                    # Ensure we have the reference object from the total_benchmark
+                    ref_func_obj = total_benchmark.get_function(ref_name)
 
-                    ref_func_obj = ref_bench.get_function(ref_name)
                     if not ref_func_obj:
                         # Fallback if name identification was complex
                         ref_func_obj = list(ref_bench.functions)[0] if ref_bench.functions else None
@@ -287,7 +296,7 @@ def run_challenge(challenge_obj: Any, student_functions: List[Callable], total_b
             # Re-normalise variants to include the 'expected' value from reference if found
             # Use explicit format to preserve kwargs
             student_variants = {variant_label: ({'args': args, 'kwargs': kwargs_variant}, expected)}
-            bench_args = {k: v for k, v in kwargs.items() if k in valid_bench_keys}
+            bench_args = {k: v for k, v in kwargs.items() if k in valid_bench_keys and k != 'timeout'}
             chall_bench = bench(student_functions, variants=student_variants, timeout=adaptive_timeout, **bench_args)
 
             if print_results:
@@ -297,11 +306,26 @@ def run_challenge(challenge_obj: Any, student_functions: List[Callable], total_b
                 total_benchmark.add_function(f)
 
                 status = f.get_status(variant_label)
-                # Hint Lookup
-                hint = (challenge_obj.hints or {}).get((stage_name, status))
-                if hint:
-                    hints.append(hint)
-                    stop_challenge = True # Stop on first hintable failure
+                if status == FailureType.NONE:
+                    continue
+
+                # Smart Hint Lookup: (stage, status) -> (None, status) -> (stage, None)
+                hints_map = getattr(challenge_obj, 'hints', {}) or {}
+                hint_msg = hints_map.get((stage_name, status))
+                if hint_msg is None:
+                    hint_msg = hints_map.get((None, status))
+                if hint_msg is None:
+                    hint_msg = hints_map.get((stage_name, None))
+
+                if hint_msg is not None:
+                    hints.append({
+                        'message': hint_msg,
+                        'stage': stage_name,
+                        'variant': variant_label
+                    })
+                    # Default policy: stop on first hintable failure
+                    if getattr(challenge_obj, 'stop_on_failure', True):
+                        stop_challenge = True
 
     return hints
 

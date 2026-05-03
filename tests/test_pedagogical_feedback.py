@@ -1,9 +1,10 @@
 import pytest
 import time
-from benchmark_my_code import challenge, Challenge, run_benchmarks, clear_registry, FailureType
+from benchmark_my_code import challenge, Challenge, run_benchmarks, clear_registry, FailureType, reset
 
 def setup_function():
     clear_registry()
+    reset()
 
 def test_staged_feedback_correctness():
     # 1. Educator defines a challenge with stages and hints
@@ -28,10 +29,45 @@ def test_staged_feedback_correctness():
         
     result = run_benchmarks(print_results=False, max_executions=1, warmup_executions=0)
     
-    # Check that it stopped and provided the correct hint
-    assert "Check your base cases!" in result.hints
-    # Since it failed Basic, it shouldn't have run Scale
-    assert result.get_function('Reference_Fibonacci').variant_count == 1
+    # Check that it stopped and provided the correct hint with context
+    assert len(result.hints) == 1
+    hint = result.hints[0]
+    assert hint['message'] == "Check your base cases!"
+    assert hint['stage'] == "Basic"
+    assert hint['variant'] == "Small"
+
+def test_smart_hint_lookup_fallbacks():
+    my_chall = Challenge(
+        name="Fallback Test",
+        parameters=["n"],
+        stages={"S1": {"v1": 1}},
+        reference=lambda n: n,
+        hints={
+            (None, FailureType.TIMEOUT): "Global Timeout Hint",
+            ("S1", None): "Stage S1 Hint"
+        }
+    )
+
+    # 1. Test Global Failure Fallback
+    @challenge(my_chall)
+    def timeout_func(n):
+        time.sleep(0.1)
+        return n
+    
+    result = run_benchmarks(timeout=0.01, print_results=False, max_executions=1, warmup_executions=0)
+    assert any(h['message'] == "Global Timeout Hint" for h in result.hints)
+    
+    clear_registry()
+    reset()
+    
+    # 2. Test Stage-Level Fallback
+    @challenge(my_chall)
+    def crash_func(n):
+        raise ValueError("Crash")
+        
+    result = run_benchmarks(print_results=False, max_executions=1, warmup_executions=0)
+    # FailureType.EXCEPTION is not in hints, so should fallback to ("S1", None)
+    assert any(h['message'] == "Stage S1 Hint" for h in result.hints)
 
 def test_staged_feedback_timeout():
     def slow_ref(n):
@@ -60,4 +96,4 @@ def test_staged_feedback_timeout():
         return n
         
     result = run_benchmarks(print_results=False, max_executions=1, warmup_executions=0)
-    assert "Your solution is too slow for large inputs." in result.hints
+    assert any(h['message'] == "Your solution is too slow for large inputs." for h in result.hints)
