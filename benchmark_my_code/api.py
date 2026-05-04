@@ -1,101 +1,91 @@
-from typing import Any, Callable, List, Union, Iterable, Dict
-from .orchestrator import bench, normalised_variants, format_parameters, BenchmarkingWorker, run_challenge
-from .model import Challenge, Benchmark, FailureType
 import logging
-import inspect
-import ast
 import copy
-import random
-import textwrap
 import sys
+import os
+import inspect
+from typing import Any, Callable, List, Optional
+from itertools import islice
 
-log = logging.getLogger(__name__)
+from .orchestrator import bench, normalised_variants, format_parameters, BenchmarkingWorker, run_challenge, results_equal, VARIANT_LIMIT
+from .model import Benchmark, Function, Challenge, FailureType
+from .config import validate_algorithmic_constraints, validate_signature
+from .exceptions import InconsistentOutcomesError, InvalidSignatureError, ForbiddenCallError
 
-_GLOBAL_REGISTRY: List[Callable] = []
-_CHALLENGE_REGISTRY: List[tuple[Callable, Challenge]] = []
+_GLOBAL_REGISTRY = []
+_CHALLENGE_REGISTRY = []
+_DISCOVERY_CACHE = {}
 
-class InconsistentOutcomesError(Exception):
-    pass
+def clear_registry():
+    """Clears all registered benchmarks and challenges."""
+    global _GLOBAL_REGISTRY, _CHALLENGE_REGISTRY, _DISCOVERY_CACHE
+    _GLOBAL_REGISTRY = []
+    _CHALLENGE_REGISTRY = []
+    _DISCOVERY_CACHE = {}
 
-class InvalidSignatureError(Exception):
-    pass
-
-class ForbiddenCallError(Exception):
-    pass
-
-def benchit(arg: Union[Callable, bool] = True, **kwargs) -> Callable:
+def benchit(arg: Any = None, **kwargs):
     """
-    Decorator to register a function for ad-hoc benchmarking.
-    Can be used as @benchit, @benchit(using=data), or @benchit(is_reference=True).
+    Decorator for simple benchmarks.
     """
-    ensure_copy = kwargs.get('ensure_copy', arg if isinstance(arg, bool) else True)
-    using = kwargs.get('using')
+    ensure_copy = kwargs.get('ensure_copy', True)
+    variants = kwargs.get('variants')
     is_reference = kwargs.get('is_reference', False)
-    
-    def decorator(func: Callable) -> Callable:
-        func._bmc_ensure_copy = ensure_copy
-        func._bmc_using = using
-        func._bmc_is_reference = is_reference
-        _GLOBAL_REGISTRY.append(func)
-        return func
 
-    if callable(arg):
-        # We need to set default using/is_reference if used as bare @benchit
-        return decorator(arg)
+    if arg is not None:
+        if isinstance(arg, bool):
+            ensure_copy = arg
+        elif callable(arg) and not kwargs and variants is None:
+            func = arg
+            _GLOBAL_REGISTRY.append(func)
+            setattr(func, "_bmc_ensure_copy", True)
+            return func
+        else:
+            variants = arg
+
+    def decorator(func):
+        _GLOBAL_REGISTRY.append(func)
+        if variants is not None:
+            setattr(func, "_bench_variants", variants)
+        
+        setattr(func, "_bmc_ensure_copy", ensure_copy)
+        setattr(func, "_bmc_is_reference", is_reference)
+            
+        if kwargs:
+            setattr(func, "_bench_options", kwargs)
+        return func
     
     return decorator
 
-def validate_signature(func: Callable, expected_params: List[str]):
-    """Validates that a function signature matches the expected parameters."""
-    sig = inspect.signature(func)
-    params = list(sig.parameters.keys())
-    
-    if params != expected_params:
-        stub = f"def {func.__name__}({', '.join(expected_params)}):"
-        raise InvalidSignatureError(
-            f"Function '{func.__name__}' has an invalid signature.\n"
-            f"Expected: {stub}\n"
-            f"Found:    def {func.__name__}({', '.join(params)}):"
-        )
+def challenge(name_or_challenge: Any = None, variants: Any = None, reference: callable = None, banned_calls: List[str] = None, timeout_multiplier: float = 10.0, stages: dict = None, hints: dict = None, **kwargs):
+    """
+    Decorator for challenge mode.
+    """
+    def decorator(func):
+        sig = inspect.signature(func)
+        func_params = list(sig.parameters.keys())
 
-class ForbiddenCallVisitor(ast.NodeVisitor):
-    def __init__(self, banned_list):
-        self.banned_list = banned_list
-        self.found = []
-
-    def visit_Call(self, node):
-        if isinstance(node.func, ast.Name):
-            if node.func.id in self.banned_list:
-                self.found.append(node.func.id)
-        elif isinstance(node.func, ast.Attribute):
-            full_name = f"{node.func.attr}" 
-            if full_name in self.banned_list:
-                self.found.append(full_name)
-        self.generic_visit(node)
-
-def validate_algorithmic_constraints(func: Callable, banned_calls: List[str]):
-    """Checks if the function uses any forbidden built-ins or methods."""
-    if not banned_calls:
-        return
-
-    try:
-        source = textwrap.dedent(inspect.getsource(func))
-        tree = ast.parse(source)
-        visitor = ForbiddenCallVisitor(banned_calls)
-        visitor.visit(tree)
-        
-        if visitor.found:
-            forbidden = ", ".join(set(visitor.found))
-            raise ForbiddenCallError(
-                f"Challenge forbids the use of: {forbidden}.\n"
-                f"Function '{func.__name__}' must be implemented from scratch."
+        if isinstance(name_or_challenge, Challenge):
+            challenge_obj = name_or_challenge
+            if not challenge_obj.name or challenge_obj.name == func.__name__:
+                challenge_obj.name = func.__name__
+            if not challenge_obj.parameters:
+                challenge_obj.parameters = func_params
+        else:
+            name = name_or_challenge or func.__name__
+            challenge_obj = Challenge(
+                name=name,
+                parameters=func_params,
+                variants=variants,
+                reference=reference,
+                banned_calls=banned_calls,
+                timeout_multiplier=timeout_multiplier,
+                stages=stages,
+                hints=hints
             )
-    except (OSError, TypeError):
-        logging.warning(f"Could not retrieve source for '{func.__name__}'. Algorithmic constraints not verified.")
+        
+        if kwargs:
+            setattr(func, "_bench_options", kwargs)
+        setattr(func, "_bmc_ensure_copy", kwargs.get('ensure_copy', True))
 
-def challenge(challenge_obj: Challenge):
-    """Decorator to register a function for a specific challenge."""
-    def decorator(func: Callable) -> Callable:
         validate_signature(func, challenge_obj.parameters)
         validate_algorithmic_constraints(func, challenge_obj.banned_calls)
         _CHALLENGE_REGISTRY.append((func, challenge_obj))
@@ -105,17 +95,20 @@ def challenge(challenge_obj: Challenge):
 def find_user_frame():
     """
     Walks back the stack to find the first frame that is not in the benchmark_my_code package.
-    This is robust against wrappers and different execution environments (Jupyter, etc.).
     """
-    import os
-    # Get the directory of the current file (api.py)
     package_dir = os.path.dirname(os.path.abspath(__file__))
     
     frame = sys._getframe(1)
     while frame:
         filename = frame.f_code.co_filename
-        # Handle Jupyter/IPython pseudo-files
-        if filename.startswith('<') and filename.endswith('>'):
+        # Improved pseudo-file detection
+        is_pseudo = (filename.startswith('<') and filename.endswith('>')) or \
+                    'pytest' in filename.lower()
+        
+        is_ipython = filename.startswith('<ipython-input-')
+        
+        if (is_pseudo or is_ipython) and not filename.startswith('<decorator-gen-'):
+            # If it's a pseudo-file, it's likely user code (Jupyter/Notebook/CLI wrapper)
             return frame
             
         frame_file = os.path.abspath(filename)
@@ -124,112 +117,82 @@ def find_user_frame():
         frame = frame.f_back
     return None
 
-_VARIANT_CACHE: Dict[str, Any] = {}
+def _safe_deepcopy(obj):
+    try:
+        return copy.deepcopy(obj)
+    except Exception:
+        return obj
 
-def clear_registry():
-    """Clears the global registries."""
-    _GLOBAL_REGISTRY.clear()
-    _CHALLENGE_REGISTRY.clear()
-    _VARIANT_CACHE.clear()
-
-from collections.abc import Iterable
-
-def _resolve_variants_for_func(func: Callable, variants: Any) -> Any:
-    """
-    If variants is None, attempts to find a local/global iterable matching 
-    the first parameter name of the function, OR a function matching
-    the parameter name that yields data (DAG resolution).
-    """
-    if variants is not None:
-        return variants
+def _resolve_variants_for_func(func, provided_variants):
+    if provided_variants is not None:
+        return provided_variants
     
-    # Story 2.2: Cache resolution by provider name to prevent generator exhaustion
-    # and ensure multiple functions in the same run see the same data.
+    explicit = getattr(func, "_bench_variants", None)
+    if explicit is not None:
+        return explicit
+        
+    sig = inspect.signature(func)
+    params = list(sig.parameters.keys())
     
-    # Check if the function has an explicit 'using' attribute from the decorator
-    if hasattr(func, '_bmc_using') and func._bmc_using is not None:
-        val = func._bmc_using
-        if callable(val):
-            cache_key = f"func:{id(val)}"
-            if cache_key in _VARIANT_CACHE:
-                return _VARIANT_CACHE[cache_key]
+    if not params:
+        return None
+        
+    frame = find_user_frame()
+    if not frame:
+        return None
+    
+    # Finding 6: Support multi-param discovery and standard names
+    candidate_names = params + ["scenarios", "data"]
+    
+    for param_name in candidate_names:
+        # Revert to id(frame) for discovery during run_benchmarks
+        cache_key = (id(frame), param_name)
+        if cache_key in _DISCOVERY_CACHE:
+            return _DISCOVERY_CACHE[cache_key]
+
+        val = frame.f_locals.get(param_name)
+        if val is None:
+            val = frame.f_globals.get(param_name)
+        
+        if val is None:
+            continue
+
+        if callable(val) and not isinstance(val, type):
             try:
-                provider_result = val()
-                if isinstance(provider_result, Iterable) and not isinstance(provider_result, (str, bytes)):
-                    res = list(provider_result)
-                    _VARIANT_CACHE[cache_key] = res
-                    return res
+                p_sig = inspect.signature(val)
+                if not p_sig.parameters:
+                    val = val()
             except Exception:
                 pass
+        
+        if hasattr(val, "__iter__") and not isinstance(val, (list, tuple, dict, str, set)):
+            # Finding 7: Truncation warning
+            val = list(islice(val, VARIANT_LIMIT + 1))
+            if len(val) > VARIANT_LIMIT:
+                logging.warning(f"Auto-discovery for '{param_name}' truncated to {VARIANT_LIMIT} items.")
+                val = val[:VARIANT_LIMIT]
+        
+        _DISCOVERY_CACHE[cache_key] = val
         return val
-
-    try:
-        sig = inspect.signature(func)
-        params = list(sig.parameters.keys())
-    except (ValueError, TypeError):
-        # Built-ins or functions without signatures
-        params = []
-    
-    # Names to look for in order of priority:
-    # 1. Each parameter name (e.g. 'data')
-    # 2. 'scenarios' (global standard name)
-    candidate_names = params + ['scenarios']
-    
-    # Use robust frame discovery
-    frame = find_user_frame()
-    while frame:
-        # Search both locals and globals (prioritize locals)
-        for name in candidate_names:
-            # Check locals first
-            val = frame.f_locals.get(name)
-            if val is None:
-                # Then check globals
-                val = frame.f_globals.get(name)
-            
-            if val is not None:
-                # Use id(val) for caching to handle generators/iterables
-                cache_key = f"var:{id(val)}"
-                if cache_key in _VARIANT_CACHE:
-                    return _VARIANT_CACHE[cache_key]
-
-                # If it's a function, it's a provider
-                if callable(val):
-                    # We don't want to call the function being benchmarked itself
-                    if val == func:
-                        continue
-                    try:
-                        provider_result = val()
-                        if isinstance(provider_result, Iterable) and not isinstance(provider_result, (str, bytes)):
-                            # Convert to list to prevent generator exhaustion
-                            res = list(provider_result)
-                            _VARIANT_CACHE[cache_key] = res
-                            return res
-                    except Exception:
-                        continue
-                
-                # Simple iterable (exclude strings/bytes to avoid accidental character-by-character variants)
-                if isinstance(val, Iterable) and not isinstance(val, (str, bytes)):
-                    # Convert to list to prevent generator exhaustion
-                    res = list(val)
-                    _VARIANT_CACHE[cache_key] = res
-                    return res
-        frame = frame.f_back
             
     return None
 
 def run_benchmarks(variants: Any = None, validate: bool = False, print_results: bool = True, **kwargs):
-    """
-    Runs benchmarks for all registered functions.
-    If validate=True, ensures all functions return the same result for each variant.
-    """
+    global _DISCOVERY_CACHE
+    _DISCOVERY_CACHE = {}
+
     if not _GLOBAL_REGISTRY and not _CHALLENGE_REGISTRY:
         logging.warning("No functions registered for benchmarking. Use @benchit or @challenge decorators.")
         return None
 
     total_benchmark = Benchmark()
     hints = []
+    
+    from .orchestrator import bench as bench_func
+    bench_params = inspect.signature(bench_func).parameters
+    valid_bench_keys = {p.name for p in bench_params.values()}
+    global_bench_args = {k: v for k, v in kwargs.items() if k in valid_bench_keys}
 
-    # 1. Run Ad-hoc benchmarks
     if _GLOBAL_REGISTRY:
         if print_results:
             print("\n🚀 Running Ad-hoc Benchmarks...")
@@ -237,84 +200,94 @@ def run_benchmarks(variants: Any = None, validate: bool = False, print_results: 
         if validate:
             if print_results:
                 print("  Validating outcomes across all registered functions...")
-            # For validation, we need a common variant set. 
+            
             common_variants = variants
             if common_variants is None and _GLOBAL_REGISTRY:
                 common_variants = _resolve_variants_for_func(_GLOBAL_REGISTRY[0], None)
             
-            for (args, kwargs_variant, name, expected) in normalised_variants(common_variants):
-                results = {}
-                for func in _GLOBAL_REGISTRY:
-                    safe_args = copy.deepcopy(args)
-                    safe_kwargs = copy.deepcopy(kwargs_variant)
-                    worker = BenchmarkingWorker()
-                    try:
-                        result, _ = worker.run(func, safe_args, safe_kwargs)
-                        results[func.__name__] = result
-                    except Exception as e:
-                        results[func.__name__] = f"<Exception: {e}>"
+            if common_variants is not None:
+                worker = BenchmarkingWorker()
+                for (args, kwargs_variant, name, expected) in normalised_variants(common_variants):
+                    results = {}
+                    for func in _GLOBAL_REGISTRY:
+                        f_ensure_copy = getattr(func, "_bmc_ensure_copy", True)
+                        safe_args = _safe_deepcopy(args) if f_ensure_copy else args
+                        safe_kwargs = _safe_deepcopy(kwargs_variant) if f_ensure_copy else kwargs_variant
+                        try:
+                            result, _ = worker.run(func, safe_args, safe_kwargs)
+                            results[func.__name__] = result
+                        except Exception as e:
+                            results[func.__name__] = f"<Exception: {e}>"
 
-                unique_results = list(results.values())
-                if len(set(map(repr, unique_results))) > 1:
-                    variant_label = name or f"args={args}, kwargs={kwargs_variant}"
-                    error_msg = f"Inconsistent outcomes for variant ({variant_label}):\n"
-                    for f_name, res in results.items():
-                        error_msg += f"  {f_name} -> {res}\n"
-                    raise InconsistentOutcomesError(error_msg)
+                    # Finding 8: Use results_equal for robust validation
+                    func_names = list(results.keys())
+                    if len(func_names) > 1:
+                        first_func = func_names[0]
+                        first_res = results[first_func]
+                        for other_func in func_names[1:]:
+                            if not results_equal(first_res, results[other_func]):
+                                variant_label = name or f"args={args}, kwargs={kwargs_variant}"
+                                error_msg = f"Inconsistent outcomes for variant ({variant_label}):\n"
+                                for f_name, res in results.items():
+                                    error_msg += f"  {f_name} -> {res}\n"
+                                raise InconsistentOutcomesError(error_msg)
 
-        # Identify reference function if any
         ref_func = next((f for f in _GLOBAL_REGISTRY if getattr(f, '_bmc_is_reference', False)), None)
-        
+
         for func in _GLOBAL_REGISTRY:
             if print_results:
                 ref_tag = " [Reference]" if getattr(func, '_bmc_is_reference', False) else ""
                 print(f"  - Benchmarking '{func.__name__}'{ref_tag}...", end="", flush=True)
 
-            # Resolve variants for THIS function specifically if none provided globally
             func_variants = _resolve_variants_for_func(func, variants)
+            f_options = getattr(func, "_bench_options", {})
+            combined_bench_args = {**global_bench_args, **{k: v for k, v in f_options.items() if k in valid_bench_keys}}
             
-            # ...
-            
-            adhoc_bench = bench(func, variants=func_variants, **kwargs)
+            b = bench(func, variants=func_variants, **combined_bench_args)
             
             if print_results:
                 print(" DONE")
             
-            # Correctness Check against Reference (if reference exists and is NOT this function)
+            # Finding 5: Optimized reference comparison
             if ref_func and func != ref_func:
-                for f_model in adhoc_bench.functions:
+                ref_model = total_benchmark.get_function(ref_func.__name__)
+                for f_model in b.functions:
                     for variant_label in list(f_model._status.keys()):
                         if f_model.get_status(variant_label) == FailureType.NONE:
-                            # Re-run both to compare (inefficient but safe for ad-hoc)
-                            # Actual variants for this label:
-                            for (args, kwargs_v, label, expected) in normalised_variants(func_variants):
-                                if label == variant_label:
-                                    worker = BenchmarkingWorker()
-                                    ref_res, _ = worker.run(ref_func, copy.deepcopy(args), copy.deepcopy(kwargs_v))
-                                    student_res, _ = worker.run(func, copy.deepcopy(args), copy.deepcopy(kwargs_v))
-                                    if student_res != ref_res:
-                                        f_model.record_status(variant_label, FailureType.CORRECTNESS)
-                                    break
+                            # Try to get reference result from already executed benchmark
+                            ref_res = None
+                            if ref_model:
+                                ref_res = ref_model.get_sample_result(variant_label)
+                            
+                            if ref_res is None:
+                                # Fallback: re-run if not available
+                                for (args, kwargs_v, label, _) in normalised_variants(func_variants):
+                                    if label == variant_label:
+                                        worker = BenchmarkingWorker()
+                                        ref_res, _ = worker.run(ref_func, _safe_deepcopy(args), _safe_deepcopy(kwargs_v))
+                                        break
+                            
+                            student_res = f_model.get_sample_result(variant_label)
+                            if not results_equal(student_res, ref_res):
+                                f_model.record_status(variant_label, FailureType.CORRECTNESS)
 
-            for f in adhoc_bench.functions:
+            for f in b.functions:
                 total_benchmark.add_function(f)
 
-    # 2. Run Challenge benchmarks
-    by_challenge = {}
-    for func, chall in _CHALLENGE_REGISTRY:
-        if chall not in by_challenge:
-            by_challenge[chall] = []
-        by_challenge[chall].append(func)
-
-    for chall, funcs in by_challenge.items():
-        hints.extend(run_challenge(chall, funcs, total_benchmark, **kwargs))
+    if _CHALLENGE_REGISTRY:
+        if print_results:
+            print("\n🏆 Running Challenges...")
+        by_challenge = {}
+        for func, chall in _CHALLENGE_REGISTRY:
+            if chall not in by_challenge:
+                by_challenge[chall] = []
+            by_challenge[chall].append(func)
+        for chall, funcs in by_challenge.items():
+            hints.extend(run_challenge(chall, funcs, total_benchmark, **kwargs))
 
     from .result import BenchmarkResult
     result = BenchmarkResult(total_benchmark)
     result.hints = hints
-    
     if print_results:
         print(result)
-
     return result
-

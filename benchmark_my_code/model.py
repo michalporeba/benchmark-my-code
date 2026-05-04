@@ -4,13 +4,13 @@ from typing import Any
 from enum import Enum, auto
 
 class FailureType(Enum):
-    NONE = auto()
-    PENDING = auto()
-    CORRECTNESS = auto()
-    TIMEOUT = auto()
-    EXCEPTION = auto()
-    CONSTRAINT = auto()
-    BASELINE_FAILURE = auto()
+    NONE = 0
+    PENDING = 1
+    CORRECTNESS = 2
+    CONSTRAINT = 3
+    TIMEOUT = 4
+    EXCEPTION = 5
+    BASELINE_FAILURE = 6
 
 
 class Function:
@@ -27,6 +27,7 @@ class Function:
         self._status = {} # Map variant -> FailureType
         self._peak_memory = {} # Map variant -> float (bytes)
         self._sample_result = {} # Map variant -> Any
+        self._exceptions = {} # Map variant -> Exception
 
     def __call__(self, *args, **kwargs):
         return self._function(*args, **kwargs)
@@ -145,6 +146,7 @@ class Function:
 
     def merge(self, other: 'Function') -> None:
         """Merges execution data from another Function object into this one."""
+        # Merge executions first
         for variant, times in other._executions.items():
             if variant not in self._executions:
                 self._executions[variant] = array.array('d')
@@ -160,6 +162,26 @@ class Function:
             self._min_time[variant] = min(self._min_time[variant], other._min_time[variant])
             self._max_time[variant] = max(self._max_time[variant], other._max_time[variant])
             self._peak_memory[variant] = max(self._peak_memory[variant], other._peak_memory.get(variant, 0.0))
+
+        # Merge statuses for variants that might not have executions (e.g. Timeouts, Exceptions)
+        for variant, status in other._status.items():
+            current_status = self._status.get(variant, FailureType.NONE)
+            if status.value > current_status.value:
+                # Finding 6: Use priority for status merging
+                self._status[variant] = status
+            
+        # Merge memory and sample results for variants without executions
+        for variant, mem in other._peak_memory.items():
+            if variant not in self._peak_memory or self._peak_memory[variant] == 0:
+                self._peak_memory[variant] = mem
+        
+        for variant, res in other._sample_result.items():
+            if variant not in self._sample_result:
+                self._sample_result[variant] = res
+
+        for variant, exc in other._exceptions.items():
+            if variant not in self._exceptions:
+                self._exceptions[variant] = exc
 
     def record_status(self, variant: str, status: FailureType) -> None:
         self._status[variant] = status
@@ -199,6 +221,10 @@ class Function:
 
     def record_exception(self, variant: str, exception: Exception) -> None: 
         self._status[variant] = FailureType.EXCEPTION
+        self._exceptions[variant] = exception
+
+    def get_exception(self, variant: str) -> Any:
+        return self._exceptions.get(variant)
 
 
 class Challenge:

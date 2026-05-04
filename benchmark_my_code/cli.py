@@ -3,8 +3,43 @@ import importlib.util
 import os
 import sys
 import ast
-from typing import List
+import hashlib
+import contextlib
+from typing import List, Optional
 from .api import run_benchmarks, clear_registry
+
+def is_safe_value(node):
+    """
+    Checks if an AST node is a 'safe' value (no side-effect calls).
+    Recursive check for collections.
+    """
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return all(is_safe_value(el) for el in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(is_safe_value(k) for k in node.keys if k is not None) and \
+               all(is_safe_value(v) for v in node.values)
+    if isinstance(node, ast.Name):
+        # We allow names (variables) but not calls to them in Assignments
+        return True
+    return False
+
+@contextlib.contextmanager
+def sys_path_context(path: str):
+    """Temporarily adds a path to sys.path."""
+    added = False
+    if path not in sys.path:
+        sys.path.insert(0, path)
+        added = True
+    try:
+        yield
+    finally:
+        if added:
+            try:
+                sys.path.remove(path)
+            except ValueError:
+                pass
 
 def has_benchmarks(file_path: str) -> bool:
     """Uses AST to check if a file contains @benchit or @challenge decorators."""
@@ -15,15 +50,15 @@ def has_benchmarks(file_path: str) -> bool:
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 for decorator in node.decorator_list:
-                    # Check for @benchit or @challenge
-                    # Simple check for Name nodes. Could be more robust (Attribute nodes etc.)
-                    if isinstance(decorator, ast.Name):
-                        if decorator.id in ("benchit", "challenge"):
+                    # Handle @dec, @dec(), @mod.dec, @mod.dec()
+                    d_node = decorator
+                    if isinstance(d_node, ast.Call):
+                        d_node = d_node.func
+                    
+                    if isinstance(d_node, ast.Name):
+                        if d_node.id in ("benchit", "challenge"):
                             return True
-                    elif isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name):
-                        if decorator.func.id in ("benchit", "challenge"):
-                            return True
-                    elif isinstance(decorator, ast.Attribute) and decorator.attr in ("benchit", "challenge"):
+                    elif isinstance(d_node, ast.Attribute) and d_node.attr in ("benchit", "challenge"):
                         return True
     except Exception:
         return False
@@ -56,58 +91,66 @@ def load_benchmarks_safely(file_path: str):
     
     # Filter top-level nodes: keep only imports, classes, and functions.
     # We also keep assignments to standard parametrization names like 'data', 'scenarios'
-    # BUT only if the value being assigned is a simple literal or data structure (no side-effect calls).
     safe_nodes = []
-    allowed_params = ["data", "scenarios"]
+    allowed_params = {"data", "scenarios"}
     
-    def is_safe_value(node):
-        """Checks if an AST node is a 'safe' value (no side-effect calls)."""
-        if isinstance(node, (ast.Constant, ast.List, ast.Dict, ast.Tuple, ast.Set, ast.Name)):
-            return True
-        # Allow simple calls to generators or providers if they are just names
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            return True
-        return False
-
     for node in tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef)):
+            safe_nodes.append(node)
+        elif isinstance(node, ast.ClassDef):
+            # Class bodies can have side effects too (e.g. prints), 
+            # but we need them for method benchmarks if we ever support them.
+            # For now, keep them but consider hardening later.
             safe_nodes.append(node)
         elif isinstance(node, ast.Assign):
-            # Keep if it assigns to one of the allowed parameter names AND value is safe
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id in allowed_params:
-                    if is_safe_value(node.value):
-                        safe_nodes.append(node)
-                        break
-        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-            # Keep if it's a call to @benchit or @challenge (though they are usually decorators)
-            pass 
+            # Handle both simple assignments and unpacking
+            targets = []
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    targets.append(t.id)
+                elif isinstance(t, (ast.Tuple, ast.List)):
+                    for elt in t.elts:
+                        if isinstance(elt, ast.Name):
+                            targets.append(elt.id)
+            
+            if any(name in allowed_params for name in targets):
+                if is_safe_value(node.value):
+                    safe_nodes.append(node)
 
     tree.body = safe_nodes
     
-    # Create a unique module name to avoid collisions (e.g., multiple 'bench.py' files)
-    import hashlib
-    file_hash = hashlib.md5(file_path.encode()).hexdigest()[:8]
+    # Create a unique module name to avoid collisions
+    abs_path = os.path.abspath(file_path)
+    file_hash = hashlib.md5(abs_path.encode()).hexdigest()[:12]
     module_name = f"bench_module_{file_hash}"
     
-    module = importlib.util.module_from_spec(
-        importlib.util.spec_from_file_location(module_name, file_path)
-    )
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
     
-    # Add the file's directory to sys.path
-    file_dir = os.path.dirname(os.path.abspath(file_path))
-    if file_dir not in sys.path:
-        sys.path.insert(0, file_dir)
-        
-    # Execute the transformed AST in the module's namespace
-    code = compile(tree, filename=file_path, mode="exec")
-    exec(code, module.__dict__)
+    # Properly set up for relative imports
+    module.__package__ = "" # Default to top-level if not in a package
+    # Inject into sys.modules so imports in the module can find it
+    sys.modules[module_name] = module
+    
+    # Add the file's directory to sys.path temporarily
+    file_dir = os.path.dirname(abs_path)
+    with sys_path_context(file_dir):
+        try:
+            # Execute the transformed AST in the module's namespace
+            code = compile(tree, filename=file_path, mode="exec")
+            exec(code, module.__dict__)
+        except Exception:
+            # Clean up sys.modules if execution fails
+            sys.modules.pop(module_name, None)
+            raise
+    
     return module
 
 def main():
     parser = argparse.ArgumentParser(prog="benchit", description="Benchmark My Code CLI runner.")
     parser.add_argument("path", help="The Python file or directory to benchmark.")
-    # Add other arguments that run_benchmarks supports
     parser.add_argument("--max-executions", type=int, default=100)
     parser.add_argument("--warmup-executions", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=10)
@@ -135,7 +178,6 @@ def main():
             continue
 
     # 3. Run benchmarks
-    # run_benchmarks will check the registry populated by decorators in the module
     try:
         run_benchmarks(
             max_executions=args.max_executions,

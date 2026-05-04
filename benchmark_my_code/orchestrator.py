@@ -11,9 +11,26 @@ log = logging.getLogger(__name__)
 JOIN_TIMEOUT = 0.5  # Theory: allow a small window for clean thread exit
 BASELINE_FLOOR = 0.001 # 1ms floor for adaptive timeouts
 REFERENCE_META_TIMEOUT = 5.0 # Max time to spend on establishing a baseline per variant
+VARIANT_LIMIT = 1000 # Safety limit for auto-discovered variants
 
 import copy
 import tracemalloc
+
+def results_equal(a, b):
+    """Robust equality check that handles NumPy arrays and avoid repr() traps."""
+    if a is b: return True
+    # Handle NumPy and other array-like objects that don't return a single bool for ==
+    if hasattr(a, "all") and hasattr(a, "__iter__") and not isinstance(a, (list, tuple, dict, str)):
+        try:
+            # Check if it's likely a numpy-style array
+            return (a == b).all()
+        except Exception:
+            pass
+    try:
+        return bool(a == b)
+    except Exception:
+        # Fallback to repr for unorderable or complex objects
+        return repr(a) == repr(b)
 
 class BenchmarkingWorker:
     _instance = None
@@ -101,11 +118,26 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
     for func in functions:
         benchmark.add_function(Function(func))
 
+    # Pre-register variants and mark as PENDING (AC 3)
+    # Finding 1: Safety limit for variants
+    variant_iterator = normalised_variants(variants)
+    variant_list = []
+    for i, v in enumerate(variant_iterator):
+        if i >= VARIANT_LIMIT:
+            log.warning(f"Benchmark truncated to {VARIANT_LIMIT} variants to prevent hangs.")
+            break
+        variant_list.append(v)
+    
+    log.debug(f"Benchmarking with {len(variant_list)} variants")
+    for f in benchmark.functions:
+        for (_, _, variant_label, _) in variant_list:
+            f.record_status(variant_label, FailureType.PENDING)
+
     for f in benchmark.functions:
         ensure_copy = getattr(f._function, '_bmc_ensure_copy', True)
 
         log.info(f"Benchmarking function {f.name}")
-        for (args, kwargs, variant_label, expected) in normalised_variants(variants):
+        for (args, kwargs, variant_label, expected) in variant_list:
             log.info(f"testing {f.name}({variant_label})")
 
             # Warmup
@@ -137,8 +169,9 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
                     try:
                         w_args = copy.deepcopy(args) if ensure_copy else args
                         w_kwargs = copy.deepcopy(kwargs) if ensure_copy else kwargs
-                        (last_result, run_time) = worker.run(f._function, w_args, w_kwargs, timeout=timeout)
-                        f.record_execution_time(variant_label, run_time, result=last_result)
+                        (batch_last_result, run_time) = worker.run(f._function, w_args, w_kwargs, timeout=timeout)
+                        f.record_execution_time(variant_label, run_time, result=batch_last_result)
+                        last_result = batch_last_result
                         total_executions += 1
                     except TimeoutError:
                         f.record_timeout(variant_label)
@@ -155,8 +188,9 @@ def bench(functions: Any, variants: Any = None, max_executions: int = 100, warmu
                     break
 
                 # Ground Truth Validation (if expected value is provided in variant)
-                if expected is not None:
-                    if last_result != expected:
+                # Finding 2: NumPy-aware comparison
+                if expected is not None and total_executions > 0:
+                    if not results_equal(last_result, expected):
                         f.record_status(variant_label, FailureType.CORRECTNESS)
                         batch_aborted = True
                         break
@@ -223,12 +257,28 @@ def run_challenge(challenge_obj: Any, student_functions: List[Callable], total_b
         # Handle generator in stage variants
         actual_variants = stage_variants
         if callable(actual_variants):
-            # Note: We can't easily isolate global random without monkeypatching or 
-            # requiring the generator to accept a Random instance. 
-            # For now, we just call it.
             actual_variants = actual_variants()
 
-        for (args, kwargs_variant, name, expected) in normalised_variants(actual_variants):
+        # Finding 4: Safety limit for challenge variants
+        variant_iterator = normalised_variants(actual_variants)
+        variant_list = []
+        for i, v in enumerate(variant_iterator):
+            if i >= VARIANT_LIMIT:
+                log.warning(f"Challenge stage '{stage_name}' truncated to {VARIANT_LIMIT} variants.")
+                break
+            variant_list.append(v)
+        
+        # Initialize student functions with PENDING status
+        for s_func in student_functions:
+            s_name = getattr(s_func, '__name__', str(s_func))
+            f_model = total_benchmark.get_function(s_name)
+            if not f_model:
+                f_model = Function(s_func)
+                total_benchmark.add_function(f_model)
+            for (_, _, variant_label, _) in variant_list:
+                f_model.record_status(variant_label, FailureType.PENDING)
+
+        for (args, kwargs_variant, name, expected) in variant_list:
             if stop_challenge: break
 
             variant_label = name or format_parameters(args, kwargs_variant)
@@ -271,9 +321,6 @@ def run_challenge(challenge_obj: Any, student_functions: List[Callable], total_b
                         for s_func in student_functions:
                             s_name = getattr(s_func, '__name__', str(s_func))
                             f_model = total_benchmark.get_function(s_name)
-                            if not f_model:
-                                f_model = Function(s_func)
-                                total_benchmark.add_function(f_model)
                             f_model.record_status(variant_label, FailureType.BASELINE_FAILURE)
                         continue
 
@@ -309,15 +356,50 @@ def run_challenge(challenge_obj: Any, student_functions: List[Callable], total_b
                 if status == FailureType.NONE:
                     continue
 
-                # Smart Hint Lookup: (stage, status) -> (None, status) -> (stage, None)
+                # Smart Hint Lookup:
+                # (stage, variant, status) -> (stage, status) -> (variant, status) -> (None, status) -> (stage, None)
                 hints_map = getattr(challenge_obj, 'hints', {}) or {}
-                hint_msg = hints_map.get((stage_name, status))
-                if hint_msg is None:
-                    hint_msg = hints_map.get((None, status))
-                if hint_msg is None:
-                    hint_msg = hints_map.get((stage_name, None))
+                
+                lookup_keys = [
+                    (stage_name, variant_label, status),
+                    (stage_name, status),
+                    (variant_label, status),
+                    (None, status),
+                    (stage_name, None)
+                ]
+                
+                hint_msg = None
+                for key in lookup_keys:
+                    hint_msg = hints_map.get(key)
+                    if hint_msg is not None:
+                        break
 
                 if hint_msg is not None:
+                    # Provide rich context for the hint if it's a template
+                    if isinstance(hint_msg, str) and "{" in hint_msg:
+                        try:
+                            # Capture actual vs expected for correctness hints
+                            actual = f.get_sample_result(variant_label)
+                            exc = f.get_exception(variant_label)
+
+                            def safe_repr(obj, limit=200):
+                                r = repr(obj)
+                                if len(r) > limit:
+                                    return r[:limit-3] + "..."
+                                return r
+
+                            hint_msg = hint_msg.format(
+                                stage=stage_name,
+                                variant=variant_label,
+                                status=status.name,
+                                actual=safe_repr(actual),
+                                expected=safe_repr(expected),
+                                exception=safe_repr(exc) if exc else ""
+                            )
+                        except Exception:
+                            # Finding 2: Fallback to raw message if formatting fails
+                            pass
+
                     hints.append({
                         'message': hint_msg,
                         'stage': stage_name,
@@ -400,8 +482,20 @@ def _to_args_kwargs(val: Any) -> tuple[tuple, dict]:
     """Helper to convert a value into (args, kwargs)."""
     if isinstance(val, dict):
         if 'args' in val or 'kwargs' in val:
-            return val.get('args', ()), val.get('kwargs', {})
+            args = val.get('args', ())
+            # Finding 10: Inconsistent iterable handling
+            if not isinstance(args, tuple):
+                # Convert all non-mapping iterables to tuple for positional expansion
+                if hasattr(args, '__iter__') and not isinstance(args, (str, bytes)):
+                    args = tuple(args)
+                else:
+                    args = (args,)
+            return args, val.get('kwargs', {})
         return (), val
+    
     if isinstance(val, tuple):
         return val, {}
+    
+    # Other iterables (generators, sets) are NOT automatically expanded here
+    # to avoid ambiguous signature mapping. They are treated as a single positional arg.
     return (val,), {}

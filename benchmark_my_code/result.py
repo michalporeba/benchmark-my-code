@@ -21,15 +21,20 @@ class BenchmarkResult:
             
         stats_list = []
         for func in self._benchmark.functions:
-            # Use list() to prevent RuntimeError if _executions changes size during iteration
-            for variant in list(func._executions.keys()):
+            # Ensure we capture all variants while preserving insertion order
+            all_variants = list(func._status.keys())
+            for v in func._executions.keys():
+                if v not in all_variants:
+                    all_variants.append(v)
+            
+            for variant in all_variants:
                 stats_list.append({
                     "function": func.name,
                     "variant": variant,
                     "executions": len(func.get_executions(variant)),
-                    "median_time": func.median_time(variant),
-                    "min_time": func.min_time(variant),
-                    "max_time": func.max_time(variant),
+                    "median_time": func.median_time(variant) if variant in func._executions else None,
+                    "min_time": func.min_time(variant) if variant in func._executions else None,
+                    "max_time": func.max_time(variant) if variant in func._executions else None,
                     "status": func.get_status(variant),
                     "peak_memory": func.get_memory(variant)
                 })
@@ -90,9 +95,13 @@ class BenchmarkResult:
                 mem_str = self._format_memory(s['peak_memory'])
                 median_str = f"{s['median_time']:.6f}" if s['median_time'] is not None else "-"
                 
+                v_str = str(s['variant'])
+                if len(v_str) > 40:
+                    v_str = v_str[:37] + "..."
+
                 table.add_row(
                     s['function'],
-                    str(s['variant']),
+                    v_str,
                     str(s['executions']),
                     median_str,
                     mem_str,
@@ -106,7 +115,7 @@ class BenchmarkResult:
         except ImportError:
             # Fallback to plain ASCII table
             col_func = max(14, max((len(s["function"]) for s in current_stats), default=14))
-            col_var = max(7, max((len(str(s["variant"])) for s in current_stats), default=7))
+            col_var = min(40, max(7, max((len(str(s["variant"])) for s in current_stats), default=7)))
             
             header = f"{'Function':<{col_func}} | {'Variant':<{col_var}} | {'Execs':<10} | {'Median (s)':<12} | {'Memory':<10} | {'Status':<10}"
             divider = "-" * len(header)
@@ -117,7 +126,12 @@ class BenchmarkResult:
                 mem_str = self._format_memory(s['peak_memory'])
                 median_val = s['median_time']
                 median_str = f"{median_val:<12.6f}" if median_val is not None else f"{'-':<12}"
-                lines.append(f"{s['function']:<{col_func}} | {str(s['variant']):<{col_var}} | {s['executions']:<10} | {median_str} | {mem_str:<10} | {status_str:<10}")
+                
+                v_str = str(s['variant'])
+                if len(v_str) > col_var:
+                    v_str = v_str[:col_var-3] + "..."
+                
+                lines.append(f"{s['function']:<{col_func}} | {v_str:<{col_var}} | {s['executions']:<10} | {median_str} | {mem_str:<10} | {status_str:<10}")
             output = "\n".join(lines) + "\n"
 
         if self.hints:
@@ -128,7 +142,11 @@ class BenchmarkResult:
                     if hint.get('variant') or hint.get('stage'):
                         parts = []
                         if hint.get('stage'): parts.append(f"Stage: {hint['stage']}")
-                        if hint.get('variant'): parts.append(f"Variant: {hint['variant']}")
+                        if hint.get('variant'): 
+                            v_str = str(hint['variant'])
+                            if len(v_str) > 50:
+                                v_str = v_str[:47] + "..."
+                            parts.append(f"Variant: {v_str}")
                         ctx = f" ({', '.join(parts)})"
                     output += f"  - {hint['message']}{ctx}\n"
                 else:

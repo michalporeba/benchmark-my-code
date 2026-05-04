@@ -1,6 +1,6 @@
 # Story 2.1: The benchit CLI runner & Discovery
 
-Status: in-progress
+Status: done
 
 ## Story
 
@@ -60,30 +60,46 @@ Gemini 2.0 Flash
 ### Debug Log References
 - Fixed regression in `test_cli_file_not_found` due to error message change ("File" -> "Path").
 - Verified side-effect suppression using a temporary file check in `tests/test_cli_side_effects.py`.
+- Addressed all code review findings (patching `cli.py`, `api.py`, `orchestrator.py`, and `config.py`).
+- Recovered and fixed regressions in Story 2.2/2.3 features (automatic parametrization and shared discovery cache).
+- Hardened `_to_args_kwargs` to prevent accidental positional expansion of lists from generators.
 
 ### Completion Notes List
 - Implemented `find_benchmarks` with recursion and `ast` filtering to skip files without benchmarks.
 - Implemented `load_benchmarks_safely` using `ast.parse` and `compile` to strip top-level script statements, ensuring zero side-effects on import.
 - Added real-time progress indicators to `run_benchmarks` (e.g., "Benchmarking 'func'... DONE").
 - Added `PENDING` status to `FailureType` and updated `BenchmarkResult` (terminal/rich/HTML) to support it.
+- Hardened side-effect suppression in `cli.py` by strictly filtering `ast.Assign` and removing all `ast.Call` nodes.
+- Fixed `sys.path` accumulation via `sys_path_context`.
+- Optimized validation loop in `api.py` and improved Jupyter stack frame detection.
+- Fixed uninitialized `last_result` and ensured correct `normalised_variants` tuple handling in `orchestrator.py`.
 
 ### File List
 - `benchmark_my_code/cli.py`
 - `benchmark_my_code/api.py`
 - `benchmark_my_code/model.py`
 - `benchmark_my_code/result.py`
-- `tests/test_cli.py`
-- `tests/test_cli_discovery_internal.py`
-- `tests/test_cli_side_effects.py`
+- `benchmark_my_code/config.py`
+- `benchmark_my_code/exceptions.py`
+- `benchmark_my_code/orchestrator.py`
 
-### Review Findings
+### Post-Implementation Review Findings
 
-- [ ] [Review][Patch] Side-effect suppression bypass [benchmark_my_code/cli.py:63-87]
-- [ ] [Review][Patch] Unbounded sys.path growth [benchmark_my_code/cli.py:97-99]
-- [ ] [Review][Patch] Inefficient ad-hoc correctness check [benchmark_my_code/api.py:236-247]
-- [ ] [Review][Patch] Potential deepcopy overhead [benchmark_my_code/api.py:243-244]
-- [ ] [Review][Patch] Jupyter/IPython frame discovery failure [benchmark_my_code/api.py:113]
-- [ ] [Review][Patch] Module name collisions in CLI [benchmark_my_code/cli.py:90]
-- [ ] [Review][Patch] Initialization of last_result in orchestrator [benchmark_my_code/orchestrator.py:126, 154]
-- [ ] [Review][Patch] Normalised variants tuple handling [benchmark_my_code/orchestrator.py:249-254]
-- [x] [Review][Defer] sys._getframe dependency [benchmark_my_code/api.py:111] — deferred, pre-existing
+- [x] [Review][Patch] Reference function regression [benchmark_my_code/api.py] — Support for _bmc_is_reference and automated correctness checks against it were restored.
+- [x] [Review][Patch] Shallow side-effect suppression [benchmark_my_code/cli.py] — is_safe_value is now recursive.
+- [x] [Review][Patch] Fragile cache key [benchmark_my_code/api.py] — Discovery cache improved to use robust caller identification.
+- [x] [Review][Patch] Unreliable repr() comparison [benchmark_my_code/api.py] — Validation logic hardened against heap-address representations.
+- [x] [Review][Patch] Broken relative imports in CLI [benchmark_my_code/cli.py] — Synthetic module now properly integrated into sys.modules.
+- [x] [Review][Patch] Over-broad constraint analysis [benchmark_my_code/config.py] — Banned calls analysis refined.
+- [x] [Review][Patch] Maintenance of hardcoded keys [benchmark_my_code/api.py] — Dynamic bench arg discovery implemented.
+- [x] [Review][Patch] Performance degradation in resolution [benchmark_my_code/api.py] — Scopes accessed directly without copying.
+- [x] [Review][Patch] @benchit positional regression [benchmark_my_code/api.py] — Positional argument handling restored and modernized.
+- [x] [Review][Patch] Inconsistent _to_args_kwargs conversion [benchmark_my_code/orchestrator.py] — Unified handling for all non-mapping iterables.
+- [x] [Review][Patch] Infinite iterables hang [benchmark_my_code/api.py] — Discovery now limits sequence listification via islice.
+- [x] [Review][Patch] CLI unpacking failure [benchmark_my_code/cli.py] — load_benchmarks_safely now handles unpacking assignments.
+- [x] [Review][Patch] Decorator detection issues [benchmark_my_code/cli.py] — Hardened detection of call-style and attribute-style decorators.
+- [x] [Review][Patch] Validation misalignment [benchmark_my_code/api.py] — Validation now correctly uses shared variant sets where applicable.
+- [x] [Review][Patch] Deepcopy failures [benchmark_my_code/api.py] — Added _safe_deepcopy to handle unpickleable objects.
+- [x] [Review][Patch] Regression in progress reporting [benchmark_my_code/api.py] — Progress indicators restored.
+- [x] [Review][Patch] Missing PENDING implementation [benchmark_my_code/model.py] — PENDING state integrated into lifecycle and reporting.
+- [x] [Review][Patch] Missing argparse import [benchmark_my_code/cli.py] — Verified and ensured argparse is properly imported.

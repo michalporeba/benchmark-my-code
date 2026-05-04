@@ -1,6 +1,6 @@
 # Story 4.1: Adaptive Hardware-Aware Timeouts
 
-Status: review
+Status: done
 
 ## Story
 
@@ -65,9 +65,14 @@ Gemini 2.0 Flash
 - Introduced `FailureType.BASELINE_FAILURE` for explicit reporting of reference crashes.
 - Implemented `BASELINE_FLOOR` (1ms) and `REFERENCE_META_TIMEOUT` (5s) for robust baseline establishment.
 - Integrated automatic ground-truth extraction from reference implementations.
+- [Post-Review] Hardened `bench()` against infinite variant generators using `VARIANT_LIMIT`.
+- [Post-Review] Implemented `results_equal` for robust correctness validation (handles NumPy arrays).
+- [Post-Review] Improved auto-discovery in `api.py` to handle multi-parameter functions and truncation warnings.
+- [Post-Review] Optimized ad-hoc reference checks to avoid redundant executions.
 
 ### File List
 - `benchmark_my_code/api.py` (Update)
 - `benchmark_my_code/orchestrator.py` (Update)
 - `benchmark_my_code/model.py` (Update)
 - `tests/test_adaptive_timeouts_hardened.py` (New)
+- `tests/test_patches_review.py` (New)
